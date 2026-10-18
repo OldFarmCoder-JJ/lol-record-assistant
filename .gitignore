@@ -34,3 +34,6 @@ Seraphine/app/config/config.json
 /.vscode/
 # Upstream standalone workflows are not used by this repository layout
 Seraphine/.github/
+
+/release/
+/.build/

@@ -1,4 +1,8 @@
 from qasync import asyncSlot
+import asyncio
+import hashlib
+from pathlib import Path
+import tempfile
 import aiohttp
 import os
 import shutil
@@ -8,7 +12,7 @@ import py7zr
 
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl
 from PyQt5.QtWidgets import (QPushButton, QVBoxLayout, QWidget, QLabel, QFileDialog,
-                             QHBoxLayout)
+                             QHBoxLayout, QApplication)
 from PyQt5.QtGui import QFont, QPixmap
 
 from app.common.qfluentwidgets import (MessageBoxBase, SmoothScrollArea,
@@ -20,7 +24,7 @@ from app.common.qfluentwidgets import (MessageBoxBase, SmoothScrollArea,
 from app.common.config import VERSION, cfg, LOCAL_PATH, BETA
 from app.common.util import getLolClientPidSlowly
 from app.common.signals import signalBus
-from app.common.update import runUpdater
+from app.common.update import runUpdater, installationDir, prepareUpdate
 from app.lol.connector import connector
 from app.components.multi_champion_select import MultiChampionSelectWidget
 from app.components.multi_lol_path_setting import PathDraggableWidget
@@ -78,7 +82,7 @@ class UpdateMessageBox(MessageBoxBase):
         self.myCancelButton.clicked.connect(self.__onCancelButtonClicked)
 
         # Simply determine the way it was opened
-        if not os.path.exists("Seraphine.exe"):
+        if installationDir() is None:
             self.infoLabel.setVisible(True)
             self.infoLabel.setText(
                 self.tr("Updating is only available on releases version"))
@@ -97,66 +101,49 @@ class UpdateMessageBox(MessageBoxBase):
 
     @asyncSlot()
     async def __onYesButtonClicked(self):
-        '''
-        This function is responsible for:
-        1. Deleting previously downloaded files in `LOCAL_PATH`
-        2. Re-downloading the new version archive
-        3. Extracting the archive and deleting it afterward
-        4. Releasing and executing the bat file, then shutting itself down
-        5. Deleting itself from the current folder and copying the extracted new version
-        6. Restarting itself
-        '''
-
-        # url = f"{github.proxyApi}/{self.info['assets'][0]['browser_download_url']}"
-
-        # Download from this fork's release URL without rewriting its owner or host.
-        url: str = self.info['assets'][0]['browser_download_url']
-
         self.myYesButton.setEnabled(False)
         self.myCancelButton.setEnabled(False)
         self.manuallyButton.setEnabled(False)
-
         self.infoLabel.setVisible(True)
         self.bar.setVisible(True)
-
-        zipPath = f'{LOCAL_PATH}/Seraphine.7z'
-        if os.path.exists(zipPath):
-            os.remove(zipPath)
-
-        dirPath = f'{LOCAL_PATH}/temp'
-        if os.path.exists(dirPath):
-            shutil.rmtree(dirPath, ignore_errors=True)
-
-        async with aiohttp.ClientSession() as sess:
-            resp = await sess.get(url)
-            length = int(resp.headers['content-length'])
-            self.bar.setMaximum(length)
-            cur = 0
-
-            with open(zipPath, 'wb') as f:
-                async for chunk in resp.content.iter_chunked(1024*1024):
-                    f.write(chunk)
-
-                    cur += len(chunk)
-                    self.bar.setValue(cur)
-                    self.infoLabel.setText(
-                        f"{cur / (1024*1024):.2f} MB / {length / (1024*1024):.2f} MB ({cur * 100 / length:.2f}%)")
-
-        self.infoLabel.setText(
-            self.tr("Downloading finished, decompressing..."))
-
-        with py7zr.SevenZipFile(zipPath, mode='r') as z:
-            z.extractall(dirPath)
-
-        os.remove(zipPath)
-        self.infoLabel.setText("Waiting for restart...")
-
-        # 覆盖自己
-        runUpdater()
-
-        # 关掉 QThread 之后退出
-        signalBus.terminateListeners.emit()
-        sys.exit()
+        try:
+            parent = Path(LOCAL_PATH) / 'updates'
+            parent.mkdir(parents=True, exist_ok=True)
+            work = Path(tempfile.mkdtemp(prefix='pending-', dir=parent))
+            archive = work / 'Seraphine.7z'
+            asset = self.info['assets'][0]
+            digest = hashlib.sha256()
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
+                async with session.get(asset['browser_download_url']) as response:
+                    response.raise_for_status()
+                    length = int(response.headers.get('Content-Length') or 0)
+                    self.bar.setRange(0, length)
+                    current = 0
+                    with archive.open('wb') as file:
+                        async for chunk in response.content.iter_chunked(1024 * 1024):
+                            file.write(chunk)
+                            digest.update(chunk)
+                            current += len(chunk)
+                            self.bar.setValue(current)
+                            self.infoLabel.setText(f'{current / (1024 * 1024):.2f} MB')
+                    if length and current != length:
+                        raise ValueError('下载文件不完整，请重试。')
+            expected = asset.get('digest') or ''
+            if expected.startswith('sha256:') and digest.hexdigest() != expected[7:]:
+                raise ValueError('发布包校验失败，请重试。')
+            self.infoLabel.setText('正在校验并准备更新…')
+            payload = work / 'payload'
+            await asyncio.get_running_loop().run_in_executor(None, prepareUpdate, archive, payload)
+            runUpdater(payload)
+            self.infoLabel.setText('更新已就绪，正在重新启动…')
+            signalBus.terminateListeners.emit()
+            await asyncio.sleep(.2)
+            QApplication.instance().quit()
+        except Exception as error:
+            self.infoLabel.setText('更新失败，可重试。\n' + str(error)[:180])
+            self.myYesButton.setEnabled(True)
+            self.myCancelButton.setEnabled(not self.info.get('forbidden', False))
+            self.manuallyButton.setEnabled(True)
 
     def __onCancelButtonClicked(self):
         self.reject()

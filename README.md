@@ -29,9 +29,9 @@ python -m venv .venv
 
 ## 下载与更新
 
-当前仓库首先发布源码，尚未提供本次修改版的 Windows 安装包。正式发布时会把完整的 `Seraphine.7z` 上传到本仓库 [Releases](https://github.com/OldFarmCoder-JJ/lol-record-assistant/releases)。
+Windows 完整包在 [Releases](https://github.com/OldFarmCoder-JJ/lol-record-assistant/releases/latest)。普通下载可选 `Seraphine.zip`，解压后运行其中的 `Seraphine.exe`；`Seraphine.7z` 用于程序内更新。
 
-更新检查入口已指向本仓库。没有 Release 或没有匹配安装包时，不提示安装更新。推送源码不会自动改变别人已下载的 EXE；Windows 包发布和升级替换流程还需正式发布前验证。
+更新检查已指向本仓库。没有新版本或没有匹配安装包时，不提示更新。更新会校验文件并备份待替换的程序文件，复制失败时回滚；个人配置和缓存保留在 AppData。使用原上游更新源的旧版本需要先手动安装本修改版一次，之后才能检查本仓库的新版本。
 
 GitHub Actions 只保留手动源码检查，不会在每次推送时自动打包。
 
@@ -41,6 +41,7 @@ GitHub Actions 只保留手动源码检查，不会在每次推送时自动打�
 .\.venv\Scripts\python.exe verify_compact_ranking.py
 .\.venv\Scripts\python.exe verify_personal_history.py
 .\.venv\Scripts\python.exe verify_github_updates.py
+.\.venv\Scripts\python.exe verify_release_update.py
 ```
 
 界面收简后已用连接中的客户端验证实时国服排行。训练房创建接口返回错误，尚未通过真实训练对局验证。测试截图中的排行数据来自腾讯 101，日期与版本以界面标注为准。
@@ -48,3 +49,6 @@ GitHub Actions 只保留手动源码检查，不会在每次推送时自动打�
 ## 来源与许可
 
 原项目：[Zzaphkiel/Seraphine](https://github.com/Zzaphkiel/Seraphine)。本仓库保留原作者声明和 GPL-3.0 许可，修改部分同样按 GPL-3.0 提供。详见 [LICENSE](LICENSE)。游戏名称、美术素材和第三方数据归各自权利人所有。
+
+正式发布时可执行 tools/build_release.py。该脚本在 Windows 构建完整目录、7z/zip、文件清单及 SHA-256；日常推送不触发构建。
+
