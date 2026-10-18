@@ -1,0 +1,36 @@
+# Source work and local-only files
+.planning/
+packaging-env/
+**/__pycache__/
+*.py[cod]
+**/.env
+**/.env.*
+!**/.env.example
+**/venv/
+**/.venv/
+**/node_modules/
+**/build/
+**/dist/
+desktop-*/
+*.log
+*-log.txt
+verify-*.log
+*.7z
+*.zip
+*.spec
+# Client-downloaded assets and user data
+Seraphine/app/resource/game/
+Seraphine/app/resource/game */
+Seraphine/app/config/config.json
+**/lockfile
+**/cache/
+# Local investigation and test captures
+/*.png
+/qq101-*
+/lcu-*.json
+/rift-probe-*
+/ui-test-assets/
+/.idea/
+/.vscode/
+# Upstream standalone workflows are not used by this repository layout
+Seraphine/.github/

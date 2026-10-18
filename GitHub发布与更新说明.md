@@ -1,0 +1,16 @@
+# GitHub 分发与后续更新
+
+目标仓库：https://github.com/OldFarmCoder-JJ/lol-record-assistant 。当前版本先发布源码，日常开发不自动打包。
+
+向其他人提供 Windows 程序时，正式构建完整的 Seraphine.7z 并上传本仓库 Releases。随后旧版助手可以检查这个仓库的版本信息。只修改源码或推送 Git 提交，不会使别人已下载的 EXE 自动变化。
+
+已经调整的入口：
+
+- 更新检查和问题反馈指向 OldFarmCoder-JJ/lol-record-assistant。
+- 使用 HTTPS；无 Release、无匹配安装包或版本没有变新时不显示安装更新。
+- 下载地址不再改写成原作者的 Gitee 地址。
+- GitHub Actions 仅提供手动源码检查，推送不会触发打包。
+
+正式发安装包之前，还需要验证完整的旧版升级、新版替换和升级失败恢复流程。这些不属于本次源码推送的完成范围。
+
+本项目基于 Seraphine，保留 GPL-3.0 许可和原作者声明；修改版分发时同时提供对应源码。
