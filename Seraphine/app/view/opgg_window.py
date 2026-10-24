@@ -16,6 +16,7 @@ from app.common.icons import Icon
 from app.lol.connector import connector
 from app.lol.opgg import opgg
 from app.lol.champions import ChampionAlias
+from app.lol.rift_analysis import bp_snapshot
 from app.common.logger import logger
 from app.common.config import qconfig, cfg
 from app.common.style_sheet import StyleSheet
@@ -186,6 +187,13 @@ class OpggWindow(OpggWindowBase):
             lambda id: self.__toChampionBuildInterface(id, 'ranked', self.positionComboBox.currentData()))
         signalBus.champSelectChanged.connect(self.onChampSelect)
         signalBus.gameStatusChanged.connect(self.onGameStatus)
+        signalBus.lolClientEnded.connect(self.clearOpponents)
+        signalBus.lolClientChanged.connect(self.clearOpponents)
+
+    def clearOpponents(self, *args):
+        self.bpRevision += 1
+        self.tierInterface.tierList.setOpponents(())
+
     def __initWindow(self):
         desktop = QApplication.desktop().availableGeometry()
         # Don't let the fixed size exceed the actual screen (e.g. 1366x768
@@ -387,10 +395,15 @@ class OpggWindow(OpggWindowBase):
         if not isinstance(session, dict) or 'myTeam' not in session:
             return
         self.bpRevision += 1
+        opponents, _ = bp_snapshot(session)
+        self.tierInterface.tierList.setOpponents(opponents)
         local = next((p for p in session.get('myTeam') or [] if p.get('cellId')==session.get('localPlayerCellId')), {})
         lane = ALIASES.get((local.get('assignedPosition') or '').lower())
         if lane:
+            # Sync personal stats without silently changing the visible ranking's lane.
+            blocker = QSignalBlocker(self.personalStats)
             self.personalStats.setLane(lane)
+            del blocker
 
     def onGameStatus(self, phase):
         if (phase == 'EndOfGame' and self.stackedWidget.currentWidget() is self.personalStats
@@ -399,6 +412,8 @@ class OpggWindow(OpggWindowBase):
         self.bpRevision += 1
         if phase == 'ChampSelect':
             self.__loadCurrentBP()
+        else:
+            self.tierInterface.tierList.setOpponents(())
 
     @asyncSlot()
     async def __loadCurrentBP(self):
@@ -409,6 +424,8 @@ class OpggWindow(OpggWindowBase):
         try:
             flow = await asyncio.wait_for(connector.getGameflowSession(), 3)
             if flow.get('phase') != 'ChampSelect':
+                if revision == self.bpRevision:
+                    self.tierInterface.tierList.setOpponents(())
                 return
             session = await asyncio.wait_for(connector.getChampSelectSession(), 3)
             if revision == self.bpRevision:

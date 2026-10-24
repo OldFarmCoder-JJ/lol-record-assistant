@@ -87,6 +87,8 @@ class TierListWidget(QFrame):
 
         self.items: list[ListItem] = []
         self.available = {}
+        self.opponents = frozenset()
+        self.sortKey = 'rank'
 
         self.__initWidget()
         self.__initLayout()
@@ -115,11 +117,13 @@ class TierListWidget(QFrame):
 
     def updateList(self, data: list):
         mayhem = bool(data and data[0].get('mayhem'))
+        self.titleBar.rankLabel.setFixedWidth(50 if mayhem else 36)
         for widget, key in ((self.titleBar.winRateLabel, 'winRate'),
                             (self.titleBar.pickRateLabel, 'pickRate'),
                             (self.titleBar.banRateLabel, 'banRate')):
+            widget.setFixedWidth(70 if mayhem else 60)
             widget.setVisible(not mayhem or any(row.get(key) is not None for row in data))
-        self.titleBar.countersLabel.hide()
+        self.titleBar.countersLabel.setVisible(bool(data) and not mayhem)
         if len(self.items) != 0:
             self.scrollLayout.takeAllWidgets()
 
@@ -127,6 +131,7 @@ class TierListWidget(QFrame):
         self.scrollArea.verticalScrollBar().setSliderPosition(0)
 
         self.items = [ListItem(0, x) for x in data]
+        self.sortKey = 'rank'
         self.titleBar.resetSelected()
         self.setAvailable(self.available, force=True)
 
@@ -137,7 +142,7 @@ class TierListWidget(QFrame):
         mayhem = bool(self.items and self.items[0].info.get('mayhem'))
         active = self.available if mayhem else {}
         self.items.sort(key=(lambda x: champion_order(x.info, active)) if active
-                        else (lambda x: x.info.get('rank', 9999)))
+                        else self._rankOrder)
         available_rank = 0
         for item in self.items:
             hero = item.info['championId']
@@ -146,38 +151,55 @@ class TierListWidget(QFrame):
                 available_rank += 1
             # Missing rates never receive a high-win-rate badge.
             item.availableRank = available_rank if selected and item.info.get('winRate') is not None else 0
+            item.opponent = not mayhem and hero in self.opponents
             suffix = (' · ' + active[hero]) if selected else ''
             if 0 < item.availableRank <= 3:
                 suffix += ' · TOP ' + str(item.availableRank)
             item.nameLabel.setText(item.name + suffix)
-            item.nameLabel.setToolTip(item.name + suffix)
+            item.nameLabel.setToolTip(item.name + suffix + (' · 对面已锁定' if item.opponent else ''))
+            item.opponentLabel.setVisible(item.opponent)
             item.update()
         self.__update()
         if active:
             self.titleBar.selectSort('winRate')
 
+    def _rankOrder(self, item):
+        value = item.info.get(self.sortKey)
+        pinned = not item.info.get('mayhem') and item.championId in self.opponents
+        return (not pinned, value is None,
+                (value if self.sortKey == 'rank' else -value) if value is not None else 0,
+                item.info.get('rank', 9999))
+
+    def setOpponents(self, champion_ids):
+        opponents = frozenset(champion_ids)
+        if opponents == self.opponents:
+            return
+        self.opponents = opponents
+        if not self.items or self.items[0].info.get('mayhem'):
+            return
+        self.setAvailable(self.available, force=True)
+        if any(item.opponent for item in self.items):
+            self.scrollArea.delegate.vScrollBar.resetValue(0)
+            self.scrollArea.verticalScrollBar().setValue(0)
+
     def __update(self):
         self.scrollLayout.removeAllWidgets()
 
         for i, x in enumerate(self.items, start=1):
-            x.setCounter(i)
+            x.setCounter(i if x.info.get('mayhem') else x.info.get('rank', i))
             self.scrollLayout.addWidget(x)
 
     @asyncSlot(str)
     async def __onSortRequested(self, key: str):
-        if not self.items or self.items[0].info.get(key) == None:
+        if not self.items or not any(item.info.get(key) is not None for item in self.items):
             return
 
         if self.available and self.items[0].info.get('mayhem'):
             self.setAvailable(self.available, force=True)
             return
 
-        if key == 'rank':
-            def fun(x): return x.info.get(key)
-        else:
-            def fun(x): return -x.info.get(key)
-
-        self.items.sort(key=fun)
+        self.sortKey = key
+        self.items.sort(key=self._rankOrder)
         self.__update()
 
     def filterChampions(self, type: str, x):
@@ -222,7 +244,8 @@ class ListTitleBar(QFrame):
         self.winRateLabel = TransparentButton(self.tr("Win Rate"))
         self.pickRateLabel = TransparentButton(self.tr("Pick Rate"))
         self.banRateLabel = TransparentButton(self.tr("Ban Rate"))
-        self.countersLabel = QLabel(self.tr("Counters"))
+        self.countersLabel = QLabel('选谁打他')
+        self.countersLabel.setToolTip('头像为该行英雄较难应对的英雄；胜率列仍为该行英雄的整体胜率。')
 
         self.selected: TransparentButton = self.rankLabel
 
@@ -255,9 +278,9 @@ class ListTitleBar(QFrame):
         self.championLabel.setAlignment(Qt.AlignCenter)
         self.championLabel.setObjectName("championLabel")
 
-        width = 70
+        width = 60
 
-        self.rankLabel.setFixedWidth(50)
+        self.rankLabel.setFixedWidth(36)
         self.winRateLabel.setFixedWidth(width)
         self.pickRateLabel.setFixedWidth(width)
         self.banRateLabel.setFixedWidth(width)
@@ -298,13 +321,14 @@ class ListTitleBar(QFrame):
 
 class ListItem(ColorAnimationFrame):
     availableRank = 0
+    opponent = False
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if 0 < self.availableRank <= 3:
+        if 0 < self.availableRank <= 3 or self.opponent:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(QColor('#d39a28'), 2))
+            painter.setPen(QPen(QColor('#d04a50') if self.opponent else QColor('#d39a28'), 2))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 4, 4)
             painter.end()
@@ -327,6 +351,10 @@ class ListItem(ColorAnimationFrame):
 
         self.numberLabel = BodyLabel(str(number))
         self.nameLabel = BodyLabel(info.get("name"))
+        self.opponentLabel = QLabel('对面')
+        self.opponentLabel.setStyleSheet('color: #d04a50; font-size: 11px; font-weight: 600;')
+        self.opponentLabel.setToolTip('对面已锁定 · 当前分路榜中存在该英雄，不代表已确认对方分路')
+        self.opponentLabel.hide()
         self.championIcon = RoundIcon(info.get("icon"), 28, 2, 2)
         if info.get('source') == 'tencent-101':
             self.tierLabel = BodyLabel('T' + str(info['tier']))
@@ -361,8 +389,9 @@ class ListItem(ColorAnimationFrame):
 
         counters = info.get("counters")
         if counters:
-            for c in counters:
+            for c in counters[:3]:
                 icon = RoundIcon(c['icon'], 22, 2, 2)
+                icon.setToolTip(f"{c.get('name', str(c['championId']))} · 可用于对抗{self.name}")
                 self.countersLayout.addWidget(icon)
         else:
             icon = BodyLabel("--")
@@ -371,7 +400,9 @@ class ListItem(ColorAnimationFrame):
         self.__initWidget()
         self.__initLayout()
 
-        self.countersLabel.hide()
+        self.countersLabel.setToolTip('选谁打' + self.name + '：' +
+            '、'.join(c.get('name', str(c['championId'])) for c in (counters or [])[:3])
+            if counters else '暂无克制数据')
         if info.get('mayhem'):
             self.winRateLabel.setVisible(True)
             self.pickRateLabel.setVisible(info.get('pickRate') is not None)
@@ -385,7 +416,7 @@ class ListItem(ColorAnimationFrame):
         self.pickRateLabel.setAlignment(Qt.AlignCenter)
         self.banRateLabel.setAlignment(Qt.AlignCenter)
 
-        width = 70
+        width = 70 if self.info.get('mayhem') else 60
 
         # self.tierLabel.setFixedWidth(50)
         self.winRateLabel.setFixedWidth(width)
@@ -402,6 +433,9 @@ class ListItem(ColorAnimationFrame):
         self.clicked.connect(self.__onClicked)
 
     def __initLayout(self):
+        if not self.info.get('mayhem'):
+            self.hBoxLayout.setContentsMargins(8, 6, 8, 6)
+            self.hBoxLayout.setSpacing(3)
         self.countersLayout.setContentsMargins(0, 0, 0, 0)
         self.countersLayout.setSpacing(2)
 
@@ -410,6 +444,7 @@ class ListItem(ColorAnimationFrame):
         self.hBoxLayout.addWidget(self.championIcon, alignment=Qt.AlignCenter)
         self.hBoxLayout.addSpacing(6)
         self.hBoxLayout.addWidget(self.nameLabel, alignment=Qt.AlignCenter)
+        self.hBoxLayout.addWidget(self.opponentLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addSpacerItem(QSpacerItem(
             0, 0, QSizePolicy.Expanding, QSizePolicy.Fixed))
         self.hBoxLayout.addWidget(self.tierLabel, alignment=Qt.AlignCenter)

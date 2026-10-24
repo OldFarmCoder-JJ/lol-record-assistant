@@ -380,7 +380,8 @@ class Opgg:
                 evidence = row['evidence']['cn']
                 rate = row['matchups'].get('cn', {}).get('winRate') if enemy_id else evidence['winRate']
                 legacy_rows.append(dict(evidence, name=row['name'], icon=row['icon'], winRate=rate,
-                    counters=[{'championId': id, 'icon': counter_icons[id]}
+                    counters=[{'championId': id, 'icon': counter_icons[id],
+                               'name': connector.manager.getChampionNameById(id)}
                               for id in evidence.get('counterIds', [])[:3]], source='tencent-rift'))
         return {'data': rows, 'source': 'rift-analysis', 'region': region, 'version': version,
                 'legacyRows': legacy_rows,
@@ -448,6 +449,7 @@ class OpggDataParser:
 
                 counters = [{
                     'championId': c['champion_id'],
+                    'name': connector.manager.getChampionNameById(c['champion_id']),
                     'icon': await connector.getChampionIcon(c['champion_id'])
                 } for c in p['counters']]
 

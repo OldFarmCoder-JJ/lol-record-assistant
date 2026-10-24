@@ -10,8 +10,11 @@
 - 海克斯选人阶段读取备选席与自己的当前英雄，按胜率置顶，并标记前三名。
 - 按账号整理个人分路英雄榜，使用顶部按钮切页查看。
 - 海克斯攻略图标优先复用本地缓存，缺图后台补齐。
+- v1.3.2：召唤师峡谷选人时，当前分路排行内的对面已锁定英雄自动置顶并加红框，保留原始名次；右侧「选谁打他」显示最多三个克制头像，悬停查看名称。适用于国服、全球与韩服普通排行，不需要搜索或手动指定对手分路。
 
 当前界面已移除占据排行空间的 Counter 对位面板和局内海克斯小窗。尚未实现游戏画面中的三个候选海克斯自动识别。
+
+对面标记仅说明对方已锁定且该英雄存在于当前分路榜，不代表已识别对方分路。胜率列保持该英雄整体胜率，克制头像不附加未经查询的对位胜率。打开排行时会读取当前选人状态，退出选人或断开客户端后清空标记。v1.3.2 为本地安装版本，尚未发布到 GitHub Release。
 
 旧的 ARAM Home 增益服务为可选功能，接口密钥从 `SERAPHINE_ARAM_APP_SECRET` 环境变量读取，源码不内置密钥。未配置时跳过该服务的网络更新，不影响腾讯英雄排行和海克斯攻略。
 
@@ -39,6 +42,7 @@ GitHub Actions 只保留手动源码检查，不会在每次推送时自动打�
 
 ```powershell
 .\.venv\Scripts\python.exe verify_compact_ranking.py
+.\.venv\Scripts\python.exe verify_opponent_ranking.py
 .\.venv\Scripts\python.exe verify_personal_history.py
 .\.venv\Scripts\python.exe verify_github_updates.py
 .\.venv\Scripts\python.exe verify_release_update.py
