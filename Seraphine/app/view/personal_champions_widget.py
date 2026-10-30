@@ -14,6 +14,7 @@ from app.view.bp_assistant_widget import LANES
 class PersonalChampionsWidget(QWidget):
     championChosen = pyqtSignal(int,str)
     laneChanged = pyqtSignal(str)
+    historyChanged = pyqtSignal(list)
 
     def __init__(self, name_lookup, icon_loader, parent=None):
         super().__init__(parent)
@@ -119,6 +120,7 @@ class PersonalChampionsWidget(QWidget):
                 self.refreshButton.setEnabled(True)
 
     def render(self,*args):
+        self.historyChanged.emit(self.data['records'])
         recent = self.viewCombo.currentData() == 'recent'
         self.laneCombo.setVisible(not recent)
         if recent:

@@ -100,22 +100,30 @@ class HextechDraftAssistant(QObject):
 
     async def poll(self):
         revision = self.revision
+        follow_revision = self.window.draftFollow.revision
         try:
             flow = await asyncio.wait_for(connector.getGameflowSession(), 3)
             if revision != self.revision:
                 return
             phase = flow.get('phase', '')
-            if phase != 'ChampSelect' or not is_hextech(flow):
+            if phase != 'ChampSelect':
                 if self.active:
                     self.reset()
                 self.phase = phase
+                if self.window.draftFollow.phase != phase:
+                    self.window.onGameStatus(phase)
                 return
             session = await asyncio.wait_for(connector.getChampSelectSession(), 3)
             if revision != self.revision or 'myTeam' not in session:
                 return
             self.phase = phase
-            self.active = True
-            self.applyDraft(session)
+            self.window.onChampSelect(session, flow=flow, follow_revision=follow_revision)
+            self.active = is_hextech(flow)
+            if self.active:
+                self.applyDraft(session)
+            else:
+                self.choices = {}
+                self.refreshBar()
         except asyncio.CancelledError:
             return
         except Exception:

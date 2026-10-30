@@ -2,6 +2,10 @@ import sys
 import win32api
 import traceback
 import asyncio
+import time
+import copy
+from datetime import datetime
+from pathlib import Path
 
 from qasync import asyncSlot, asyncClose
 from PyQt5.QtGui import QColor, QPainter, QIcon, QShowEvent
@@ -16,8 +20,10 @@ from app.lol.connector import connector
 from app.lol.opgg import opgg
 from app.lol.champions import ChampionAlias
 from app.lol.rift_analysis import bp_snapshot
+from app.lol.draft_follow import DraftFollow
+from app.lol.ranking_cache import RankingCache
 from app.common.logger import logger
-from app.common.config import qconfig, cfg
+from app.common.config import qconfig, cfg, LOCAL_PATH
 from app.common.style_sheet import StyleSheet
 from app.common.signals import signalBus
 from app.common.util import getLolClientWindowPos
@@ -25,7 +31,7 @@ from app.common.qfluentwidgets import (FramelessWindow, isDarkTheme, BackgroundA
                                        FluentTitleBar,  ComboBox, BodyLabel, ToolTipFilter,
                                        ToolTipPosition, IndeterminateProgressRing, setTheme,
                                        Theme, PushButton, SearchLineEdit, ToolButton,
-                                       FlyoutViewBase, Flyout, FlyoutAnimationType)
+                                       FlyoutViewBase, Flyout, FlyoutAnimationType, CheckBox, CaptionLabel)
 from app.components.transparent_button import TransparentToggleButton
 from app.view.opgg_tier_interface import TierInterface
 from app.view.opgg_build_interface import BuildInterface
@@ -142,13 +148,15 @@ class OpggWindow(OpggWindowBase):
         self.loadRevision = 0
         self.requestedInterface = None
         self.requestedMode = 'ranked'
+        self.draftFollow = DraftFollow(cfg.get(cfg.autoFollowDraft))
+        self.currentDraftFlow = None
+        self.currentDraftSession = None
+        self.rankingCache = RankingCache(LOCAL_PATH + '/cache/rankings')
         self.personalStats = PersonalChampionsWidget(
             lambda id: connector.manager.getChampionNameById(id) if connector.manager else str(id),
             opgg.getBPChampionIcon)
         self.personalButton = PushButton('我的英雄')
         self.personalButton.clicked.connect(self.__togglePersonalStats)
-        signalBus.currentSummonerProfileChanged.connect(self.personalStats.setAccount)
-        signalBus.lolClientEnded.connect(self.personalStats.disconnect)
 
         self.debugButton = PushButton()
         self.debugButton.setFixedSize(33, 33)
@@ -162,11 +170,23 @@ class OpggWindow(OpggWindowBase):
         self.waitingInterface = WaitingInterface()
         self.errorInterface = ErrorInterface()
         self.homeInterface = HomeInterface()
+        self.statusBar = QWidget()
+        status_layout = QHBoxLayout(self.statusBar)
+        status_layout.setContentsMargins(4, 0, 4, 0)
+        status_layout.setSpacing(8)
+        self.rankStatus = CaptionLabel('选人时同步模式和分路')
+        self.rankStatus.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.followCheck = CheckBox('自动跟随')
+        self.followCheck.setChecked(self.draftFollow.enabled)
+        self.followCheck.toggled.connect(self.__onFollowToggled)
+        self.retryRankingButton = PushButton('刷新')
+        self.retryRankingButton.setFixedWidth(55)
+        self.retryRankingButton.clicked.connect(self.__retryRanking)
+        status_layout.addWidget(self.rankStatus, 1)
+        status_layout.addWidget(self.followCheck)
+        status_layout.addWidget(self.retryRankingButton)
+        self.statusBar.setFixedHeight(30)
 
-        # 缓存一个召唤师峡谷的梯队数据，切换位置的时候不重新调 opgg 了
-        self.cachedTier = None
-        self.cachedRegion = None
-        self.cachedRankedTierList = None
         self.displayedBuildKey = None
 
         self.filterLock = False
@@ -181,6 +201,8 @@ class OpggWindow(OpggWindowBase):
         self.positionComboBox.currentIndexChanged.connect(
             lambda _: self.personalStats.setLane(self.positionComboBox.currentData()))
         self.personalStats.championChosen.connect(lambda hero,lane: self.__toChampionBuildInterface(hero,'ranked',lane))
+        self.personalStats.historyChanged.connect(self.__onPersonalHistory)
+        signalBus.currentSummonerProfileChanged.connect(self.__onAccount)
 
         # self.debugButton.click()
         self.debugButton.setVisible(False)
@@ -192,11 +214,83 @@ class OpggWindow(OpggWindowBase):
         signalBus.gameStatusChanged.connect(self.onGameStatus)
         signalBus.lolClientEnded.connect(self.clearOpponents)
         signalBus.lolClientChanged.connect(self.clearOpponents)
+        self.__updateFollowStatus()
+
+    def __onAccount(self, profile):
+        previous = self.personalStats.puuid
+        self.tierInterface.tierList.setAccount(profile)
+        self.personalStats.setAccount(profile)
+        self.tierInterface.tierList.setRecent(self.personalStats.data['records'])
+        if (self.personalStats.puuid and self.personalStats.puuid != previous
+                and connector.lcuSess is not None
+                and time.time() - self.personalStats.data.get('updated', 0) > 300):
+            self.personalStats.requestRefresh()
+
+    def __onPersonalHistory(self, records):
+        self.tierInterface.tierList.setAccount(self.personalStats.puuid)
+        self.tierInterface.tierList.setRecent(records)
+
+    def __updateFollowStatus(self):
+        paused = self.draftFollow.enabled and self.draftFollow.suspended
+        self.followCheck.setText('跟随已暂停' if paused else '自动跟随')
+        self.followCheck.setToolTip('本局已手动改选，自动跟随暂停；取消后重新勾选可恢复，下次选人也会恢复。' if paused else
+            '选人时跟随已识别的游戏模式和本人分路；手动改选后本局暂停，不改变游戏里的选择。')
+
+    def __manualDraftSelection(self):
+        self.draftFollow.user_override()
+        self.__updateFollowStatus()
+
+    def __onModeChanged(self, index):
+        if not self.filterLock:
+            self.__manualDraftSelection()
+            self.__onFilterTextChanged(index)
+
+    def __onPositionChanged(self, index):
+        if not self.filterLock:
+            self.__manualDraftSelection()
+            self.__onFilterTextChanged(index)
+
+    def __onOtherFilterChanged(self, index):
+        if not self.filterLock:
+            self.__onFilterTextChanged(index)
+
+    def __onFollowToggled(self, enabled):
+        cfg.set(cfg.autoFollowDraft, enabled)
+        self.draftFollow.set_enabled(enabled)
+        self.__updateFollowStatus()
+        if enabled:
+            if self.currentDraftFlow and self.currentDraftSession:
+                self.__applyDraftFollow(self.currentDraftFlow, self.currentDraftSession)
+            else:
+                self.__loadCurrentBP()
+
+    def __applyDraftFollow(self, flow, session, revision=None):
+        target = self.draftFollow.observe(flow, session, revision=revision)
+        self.__updateFollowStatus()
+        if target is None:
+            return
+        blockers = [QSignalBlocker(self.modeComboBox), QSignalBlocker(self.positionComboBox),
+                    QSignalBlocker(self.personalStats)]
+        self.__setComboBoxCurrentData(self.modeComboBox, target['mode'])
+        if target['lane']:
+            self.__setComboBoxCurrentData(self.positionComboBox, target['lane'])
+            self.personalStats.setLane(target['lane'])
+        del blockers
+        self.requestedMode = target['mode']
+        self.__configureMode(target['mode'], self.regionComboBox.currentData())
+        self.hextechLive.refreshBar()
+        if self.stackedWidget.currentWidget() is not self.personalStats:
+            self.__refreshRanking()
 
     def clearOpponents(self, *args):
         self.bpRevision += 1
         self.loadRevision += 1
         self.clientLane = None
+        self.currentDraftFlow = self.currentDraftSession = None
+        self.draftFollow.reset()
+        self.personalStats.disconnect()
+        self.tierInterface.tierList.setAccount('')
+        self.__updateFollowStatus()
         self.tierInterface.tierList.setOpponents(())
 
     def __initWindow(self):
@@ -270,13 +364,13 @@ class OpggWindow(OpggWindowBase):
         self.stackedWidget.currentChanged.connect(
             self.__onStackedWidgetCurrentChanged)
         self.modeComboBox.currentIndexChanged.connect(
-            self.__onFilterTextChanged)
+            self.__onModeChanged)
         self.regionComboBox.currentIndexChanged.connect(
-            self.__onFilterTextChanged)
+            self.__onOtherFilterChanged)
         self.tierComboBox.currentIndexChanged.connect(
-            self.__onFilterTextChanged)
+            self.__onOtherFilterChanged)
         self.positionComboBox.currentIndexChanged.connect(
-            self.__onFilterTextChanged)
+            self.__onPositionChanged)
 
         self.toggleButton.changed.connect(self.__onToggleButtonClicked)
         self.searchButton.clicked.connect(self.__onSearchButtonClicked)
@@ -317,6 +411,7 @@ class OpggWindow(OpggWindowBase):
 
         self.vBoxLayout.setAlignment(Qt.AlignTop)
         self.vBoxLayout.addLayout(self.filterLayout)
+        self.vBoxLayout.addWidget(self.statusBar)
         self.vBoxLayout.addWidget(self.stackedWidget,1)
 
     @asyncSlot()
@@ -332,6 +427,7 @@ class OpggWindow(OpggWindowBase):
     def __onPersonalLaneChanged(self,lane):
         if self.positionComboBox.currentData()==lane:
             return
+        self.__manualDraftSelection()
         blocker=QSignalBlocker(self.positionComboBox)
         self.positionComboBox.setCurrentIndex(self.positionComboBox.findData(lane))
         del blocker
@@ -344,6 +440,9 @@ class OpggWindow(OpggWindowBase):
     def __onStackedWidgetCurrentChanged(self):
         widget = self.stackedWidget.currentWidget()
         self.personalButton.setText('返回排行' if widget is self.personalStats else '我的英雄')
+        self.personalButton.setVisible(widget is self.personalStats or self.modeComboBox.currentData() == 'ranked')
+        self.retryRankingButton.setVisible(widget not in (self.personalStats, self.homeInterface))
+        self.rankStatus.setVisible(widget is not self.personalStats)
         self.setComboBoxesEnabled(True)
 
         if widget is self.homeInterface:
@@ -397,7 +496,7 @@ class OpggWindow(OpggWindowBase):
         self.positionComboBox.setEnabled(enabled)
         self.personalButton.setEnabled(enabled)
 
-    def onChampSelect(self, session):
+    def onChampSelect(self, session, flow=None, follow_revision=None):
         # Connector emits the LCU WebSocket event envelope, not just its data.
         if isinstance(session, dict) and session.get('eventType') == 'Delete':
             self.onGameStatus('None')
@@ -411,17 +510,20 @@ class OpggWindow(OpggWindowBase):
         self.tierInterface.tierList.setOpponents(opponents)
         local = next((p for p in session.get('myTeam') or [] if p.get('cellId')==session.get('localPlayerCellId')), {})
         lane = ALIASES.get((local.get('assignedPosition') or '').lower())
-        if lane and lane != self.clientLane:
-            self.clientLane = lane
-            blocker = QSignalBlocker(self.personalStats)
-            self.personalStats.setLane(lane)
-            del blocker
-            if self.modeComboBox.currentData() == 'ranked':
-                blocker = QSignalBlocker(self.positionComboBox)
-                self.__setComboBoxCurrentData(self.positionComboBox, lane)
-                del blocker
-                if self.stackedWidget.currentWidget() is not self.personalStats:
-                    self.__refreshRanking()
+        self.clientLane = lane
+        self.currentDraftSession = session
+        if flow is not None:
+            self.currentDraftFlow = flow
+            # A fresh GET also recovers a missed WebSocket phase transition.
+            # Reads started before a phase/manual change cannot reset that state.
+            if (follow_revision is not None and follow_revision == self.draftFollow.revision
+                    and flow.get('phase') == 'ChampSelect'
+                    and self.draftFollow.phase not in (None, 'ChampSelect')):
+                follow_revision = self.draftFollow.on_phase('ChampSelect')
+        if self.currentDraftFlow:
+            self.__applyDraftFollow(self.currentDraftFlow, session, follow_revision)
+        elif connector.lcuSess is not None:
+            self.__loadCurrentBP()
 
     @asyncSlot()
     async def __refreshRanking(self):
@@ -432,10 +534,13 @@ class OpggWindow(OpggWindowBase):
                 and connector.lcuSess is not None):
             self.personalStats.requestRefresh()
         self.bpRevision += 1
+        self.draftFollow.on_phase(phase)
+        self.__updateFollowStatus()
         if phase == 'ChampSelect':
             self.__loadCurrentBP()
         else:
             self.clientLane = None
+            self.currentDraftFlow = self.currentDraftSession = None
             self.tierInterface.tierList.setOpponents(())
 
     @asyncSlot()
@@ -444,6 +549,7 @@ class OpggWindow(OpggWindowBase):
             return
         self.bpLoading = True
         revision = self.bpRevision
+        follow_revision = self.draftFollow.revision
         try:
             flow = await asyncio.wait_for(connector.getGameflowSession(), 3)
             if flow.get('phase') != 'ChampSelect':
@@ -452,7 +558,7 @@ class OpggWindow(OpggWindowBase):
                 return
             session = await asyncio.wait_for(connector.getChampSelectSession(), 3)
             if revision == self.bpRevision:
-                self.onChampSelect(session)
+                self.onChampSelect(session, flow=flow, follow_revision=follow_revision)
         except (Exception, asyncio.CancelledError):
             pass  # WebSocket updates still provide the next snapshot.
         finally:
@@ -484,13 +590,6 @@ class OpggWindow(OpggWindowBase):
         mode = self.modeComboBox.currentData()
         mode_changed = mode != self.requestedMode
         self.requestedMode = mode
-        if mode_changed and mode == 'ranked' and self.clientLane:
-            blocker = QSignalBlocker(self.positionComboBox)
-            self.__setComboBoxCurrentData(self.positionComboBox, self.clientLane)
-            del blocker
-            blocker = QSignalBlocker(self.personalStats)
-            self.personalStats.setLane(self.clientLane)
-            del blocker
 
         current = self.stackedWidget.currentWidget()
         if mode_changed:
@@ -540,7 +639,21 @@ class OpggWindow(OpggWindowBase):
         self.requestedMode = self.modeComboBox.currentData()
         # filterLock only batches synchronous selector changes, never network waits.
         self.setAutoRefreshEnabled(True)
-        self.setCurrentInterface(self.waitingInterface)
+        cache_key = self.__rankingKey() if to is self.tierInterface else None
+        cached = self.rankingCache.get(cache_key) if cache_key else None
+        if cached:
+            try:
+                self.__applyTierPayload(cached['payload'])
+            except (KeyError, TypeError, ValueError, AttributeError):
+                cached = None
+        if cached:
+            self.setCurrentInterface(self.tierInterface)
+            stamp = datetime.fromtimestamp(cached['storedAt']).strftime('%m-%d %H:%M')
+            self.rankStatus.setText('缓存 ' + stamp + ' · 正在更新')
+            self.rankStatus.setToolTip('当前筛选条件的本地缓存；统计日期和数据版本见右上角。')
+        else:
+            self.setCurrentInterface(self.waitingInterface)
+            self.rankStatus.setText('正在读取排行…' if to is self.tierInterface else '正在读取攻略…')
 
         try:
             # 尝试刷新当前的界面
@@ -549,8 +662,17 @@ class OpggWindow(OpggWindowBase):
             # 让转圈消失，显示界面
             if self.__requestCurrent(revision, loaded_selection or selection):
                 self.setCurrentInterface(to)
+                self.rankStatus.setText('已读取 · ' + datetime.now().strftime('%H:%M'))
+                self.rankStatus.setToolTip('统计日期和数据版本见右上角；刷新可重新请求数据。')
         except Exception as e:
             if not self.__requestCurrent(revision, selection):
+                return
+            if cached:
+                self.__applyTierPayload(cached['payload'])
+                self.setCurrentInterface(self.tierInterface)
+                stamp = datetime.fromtimestamp(cached['storedAt']).strftime('%m-%d %H:%M')
+                self.rankStatus.setText('暂用缓存 ' + stamp + ' · 更新失败，可重试')
+                self.rankStatus.setToolTip('仅保留当前筛选条件的缓存。' + str(e)[:160])
                 return
             stack = traceback.format_exc()
             logger.error(f"Get OPGG data failed, {stack}\n{e}", TAG)
@@ -569,6 +691,7 @@ class OpggWindow(OpggWindowBase):
 
             # 显示出错的界面
             self.setCurrentInterface(self.errorInterface)
+            self.rankStatus.setText('读取失败 · 点击刷新重试')
         finally:
             if revision == self.loadRevision:
                 self.setAutoRefreshEnabled(True)
@@ -576,6 +699,49 @@ class OpggWindow(OpggWindowBase):
     def __filterKey(self):
         return tuple(box.currentData() for box in (self.modeComboBox, self.regionComboBox,
                                                    self.tierComboBox, self.positionComboBox))
+
+    def __rankingKey(self):
+        mode = self.modeComboBox.currentData()
+        analysis = self.tierInterface.analysis
+        if mode == 'aram_mayhem':
+            return self.rankingCache.make_key(mode, 'cn', 'all', 'none')
+        return self.rankingCache.make_key(mode, self.regionComboBox.currentData(),
+            self.tierComboBox.currentData(), self.positionComboBox.currentData(),
+            fraction=analysis.fraction.currentData(), only_strong=analysis.strongOnly.isChecked(),
+            strict=analysis.strict.isChecked() and self.regionComboBox.currentData() == 'consensus')
+
+    def __applyTierPayload(self, payload):
+        data = copy.deepcopy(payload)
+        def usable_icons(value):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    if key == 'icon' and isinstance(item, str) and not Path(item).is_file():
+                        value[key] = 'app/resource/images/champion-0.png'
+                    else:
+                        usable_icons(item)
+            elif isinstance(value, list):
+                for item in value:
+                    usable_icons(item)
+        usable_icons(data)
+        mode = self.modeComboBox.currentData()
+        self.__configureMode(mode, self.regionComboBox.currentData())
+        self.__setVersionLabel(data)
+        if data.get('source') == 'rift-analysis':
+            self.tierInterface.showAnalysis(data)
+        else:
+            self.tierInterface.showAnalysis(None)
+            rows = data['data'][self.positionComboBox.currentData()] if mode == 'ranked' else data['data']
+            self.tierInterface.tierList.updateList(rows)
+
+    @asyncSlot()
+    async def __retryRanking(self):
+        mode = self.modeComboBox.currentData()
+        region = self.regionComboBox.currentData()
+        tier = 'all' if mode == 'aram_mayhem' else self.tierComboBox.currentData()
+        invalidate = getattr(opgg, 'invalidateRanking', None)
+        if invalidate:
+            invalidate(region, mode, tier)
+        await self.updateAndSwitchTo(self.tierInterface, self.tierInterface)
 
     def __requestCurrent(self, revision, selection):
         return (revision is None or revision == self.loadRevision) and selection == self.__filterKey()
@@ -608,16 +774,20 @@ class OpggWindow(OpggWindowBase):
 
     def __configureMode(self, mode, region):
         ranked = mode == 'ranked'
-        self.personalButton.setVisible(ranked)
+        self.personalButton.setVisible(ranked or self.stackedWidget.currentWidget() is self.personalStats)
         desktop = QApplication.desktop().availableGeometry()
         width = 640
         self.setFixedSize(min(width, desktop.width()), min(826, desktop.height()))
         self.setWindowTitle('腾讯 101 · 海克斯大乱斗' if not ranked else
                             '英雄排行与攻略')
         self.positionComboBox.setToolTip('选择分路查看英雄排行与攻略')
+        self.positionComboBox.setVisible(ranked)
+        self.regionComboBox.setVisible(ranked)
+        self.tierComboBox.setVisible(ranked)
 
     async def __updateTierInterface(self, revision=None):
         selection = self.__filterKey()
+        cache_key = self.__rankingKey()
         mode = self.modeComboBox.currentData()
         region = self.regionComboBox.currentData()
         tier = self.tierComboBox.currentData()
@@ -654,37 +824,20 @@ class OpggWindow(OpggWindowBase):
                     strict=analysis.strict.isChecked() and region=='consensus')
                 if not self.__requestCurrent(revision, selection):
                     return
-                self.__setVersionLabel(data)
-                self.tierInterface.showAnalysis(data)
+                self.__applyTierPayload(data)
+                self.rankingCache.put(cache_key, data)
                 return
             # rank 模式下，如果是切换了位置选项，会命中 cache，不用重新请求了
-            if tier == self.cachedTier and \
-                    region == self.cachedRegion and \
-                    self.cachedRankedTierList != None:
-                res = self.cachedRankedTierList['data'][position]
-                data = self.cachedRankedTierList
-
-            # 否则是第一次请求 rank 模式数据，记录一下 cache
-            else:
-                data = await opgg.getTierList(region, mode, tier)
-                if not self.__requestCurrent(revision, selection):
-                    return
-                self.cachedTier = tier
-                self.cachedRegion = region
-                self.cachedRankedTierList = data
-
-                res = data['data'][position]
+            data = await opgg.getTierList(region, mode, tier)
 
         # 除了 rank 以外的其他模式，该咋整咋整吧
         else:
             data = await opgg.getTierList(region, mode, tier)
-            res = data['data']
 
         if not self.__requestCurrent(revision, selection):
             return
-        self.__setVersionLabel(data)
-        self.tierInterface.showAnalysis(None)
-        self.tierInterface.tierList.updateList(res)
+        self.__applyTierPayload(data)
+        self.rankingCache.put(cache_key, data)
 
     async def __updateBuildInterface(self, revision=None):
         selection = self.__filterKey()

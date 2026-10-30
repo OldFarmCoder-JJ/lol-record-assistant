@@ -105,6 +105,7 @@ class Config(QConfig):
                                     BoolValidator())
     autoShowOpgg = ConfigItem("Functions", "AutoShowOpgg", True,
                               BoolValidator())
+    autoFollowDraft = ConfigItem("Functions", "AutoFollowDraft", True, BoolValidator())
     enableOpggOnTop = ConfigItem(
         "Functions", "EnableOpggOnTop", False, BoolValidator())
     enableAutoAcceptMatching = ConfigItem("Functions",

@@ -78,7 +78,8 @@ async def verify():
 
     def draft(value):
         window.onChampSelect(dict(eventType='Update', data=dict(localPlayerCellId=0,
-            myTeam=[dict(cellId=0, championId=0, assignedPosition=value)], theirTeam=[])))
+            myTeam=[dict(cellId=0, championId=0, assignedPosition=value)], theirTeam=[])),
+            flow=dict(phase='ChampSelect', gameData=dict(queue=dict(id=420))))
 
     # First initialization starts from the home page, then real UI signals drive all updates.
     await window.initWindow()
@@ -116,6 +117,9 @@ async def verify():
     gates[('cn', 'TOP')] = gate
     lane('TOP')
     await until(lambda: ('cn', 'TOP') not in gates)
+    # A real new draft resets prior manual browsing before the assigned lane arrives.
+    window.draftFollow.on_phase('Lobby')
+    window.draftFollow.on_phase('ChampSelect')
     draft('middle')
     await until(lambda: shown(1))
     assert window.positionComboBox.currentData() == 'MID'
@@ -164,6 +168,9 @@ async def verify():
     await asyncio.sleep(.05)
     assert shown(11), 'Reading a lane in Mayhem must not replace its ranking'
     mode('ranked')
+    await until(lambda: shown(86))
+    window.followCheck.setChecked(False)
+    window.followCheck.setChecked(True)
     await until(lambda: shown(1))
     assert window.positionComboBox.currentData() == 'MID'
 

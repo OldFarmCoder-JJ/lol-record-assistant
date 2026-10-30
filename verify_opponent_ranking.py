@@ -76,6 +76,7 @@ async def verify():
 
     await load()
     window.show()
+    window.currentDraftFlow = dict(phase='ChampSelect', gameData=dict(queue=dict(id=420)))
     await asyncio.sleep(.15)
     assert len(ranking.items) == 51
     assert ranking.items[0].championId == 59

@@ -391,6 +391,14 @@ class Opgg:
                 'enemyName': connector.manager.getChampionNameById(enemy_id) if enemy_id else '',
                 'fallback': False}
 
+    def invalidateRanking(self, region, mode, tier):
+        sources = ('global', 'kr') if region == 'consensus' else (region,)
+        invalidate = getattr(self.getTierList, 'cache_invalidate', None)
+        if invalidate:
+            invalidate(region, mode, tier)
+        for source in sources:
+            self.__fetchTierList.cache_invalidate(source, mode, tier)
+
     @alru_cache(maxsize=512, ttl=900)
     async def getTierList(self, region, mode, tier):
         if mode == 'aram_mayhem':

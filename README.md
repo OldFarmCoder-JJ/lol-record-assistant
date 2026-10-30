@@ -13,6 +13,11 @@
 - v1.3.2：召唤师峡谷选人时，当前分路排行内的对面已锁定英雄自动置顶并加红框，保留原始名次；右侧「选谁打他」显示最多三个克制头像，悬停查看名称。适用于国服、全球与韩服普通排行，不需要搜索或手动指定对手分路。
 - v1.3.3：切换海斗/峡谷会重新显示对应排行；客户端识别本人分路后同步切换选项和列表，旧请求不会覆盖新选择。
 - v1.3.3：「我的英雄」默认显示最近20场排位的逐场英雄、胜负、分路、单双排/灵活组排和时间；重开单独标注。可切换回原分路英雄榜。客户端历史分页重复时，复用官方历史接口补读更早战绩；接口不可用或历史不足时显示实际已读取场次。
+- 源码开发版第一批：按账号收藏英雄；排行和克制头像显示收藏星标与「近」标记。排位/海斗分别依据已读取记录内最近20场有效对局标注，不改变胜率排序。
+- 源码开发版第一批：选人时可自动跟随海斗/峡谷及本人分路；手动改模式或分路后本局暂停，重新勾选或下次选人恢复。查看个人战绩时不自动跳页。
+- 源码开发版第一批：同筛选条件有缓存时先显示，并标明缓存时间；读取失败保留旧缓存，可点击「刷新」重试。模式、服务器、段位、分路和比较规则不同不混用。
+
+第一批源码功能的操作说明见 [第一批升级使用说明](docs/第一批升级使用说明.md)，尚未打包进入 E 盘安装版。
 
 当前界面已移除占据排行空间的 Counter 对位面板和局内海克斯小窗。尚未实现游戏画面中的三个候选海克斯自动识别。
 
@@ -48,6 +53,12 @@ GitHub Actions 只保留手动源码检查，不会在每次推送时自动打�
 .\.venv\Scripts\python.exe verify_personal_history.py
 .\.venv\Scripts\python.exe verify_ranking_refresh.py
 .\.venv\Scripts\python.exe verify_recent_ranked.py
+.\.venv\Scripts\python.exe verify_champion_preferences.py
+.\.venv\Scripts\python.exe verify_hero_pool_ui.py
+.\.venv\Scripts\python.exe verify_draft_follow.py
+.\.venv\Scripts\python.exe verify_auto_follow_ui.py
+.\.venv\Scripts\python.exe verify_ranking_cache.py
+.\.venv\Scripts\python.exe verify_ranking_cache_ui.py
 .\.venv\Scripts\python.exe verify_github_updates.py
 .\.venv\Scripts\python.exe verify_release_update.py
 ```

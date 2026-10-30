@@ -1,7 +1,7 @@
 
 from PyQt5.QtWidgets import (QHBoxLayout, QWidget, QFrame, QVBoxLayout, QSpacerItem,
                              QSizePolicy, QLabel, QHBoxLayout, QWidget, QLabel, QFrame,
-                             QVBoxLayout, QSpacerItem, QSizePolicy)
+                             QVBoxLayout, QSpacerItem, QSizePolicy, QToolButton, QMenu)
 from PyQt5.QtCore import Qt, pyqtSignal, QEasingCurve
 from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen
 from qasync import asyncSlot
@@ -14,6 +14,8 @@ from app.common.style_sheet import StyleSheet
 from app.common.qfluentwidgets import BodyLabel, SmoothScrollArea, FlowLayout, IconWidget
 from app.view.rift_analysis_widget import RiftAnalysisWidget, tier_pixmap
 from app.lol.hextech_live import champion_order
+from app.lol.champion_preferences import ChampionPreferences, preference_text
+from app.common.config import LOCAL_PATH
 
 
 class TierInterface(QFrame):
@@ -64,6 +66,7 @@ class TierInterface(QFrame):
 
 
 class TierListWidget(QFrame):
+    favoriteChanged = pyqtSignal(int, bool)
     def __init__(self, parent=None):
         '''
         英雄梯队列表组件
@@ -89,6 +92,7 @@ class TierListWidget(QFrame):
         self.available = {}
         self.opponents = frozenset()
         self.sortKey = 'rank'
+        self.preferences = ChampionPreferences(LOCAL_PATH + '/cache/champion-preferences')
 
         self.__initWidget()
         self.__initLayout()
@@ -131,9 +135,37 @@ class TierListWidget(QFrame):
         self.scrollArea.verticalScrollBar().setSliderPosition(0)
 
         self.items = [ListItem(0, x) for x in data]
+        for item in self.items:
+            item.favoriteRequested.connect(self.toggleFavorite)
         self.sortKey = 'rank'
         self.titleBar.resetSelected()
         self.setAvailable(self.available, force=True)
+        self.refreshPreferences()
+
+    def setAccount(self, profile):
+        if self.preferences.set_account(profile):
+            self.refreshPreferences()
+
+    def setRecent(self, records):
+        if self.preferences.set_recent(records):
+            self.refreshPreferences()
+
+    def toggleFavorite(self, hero):
+        if not self.preferences.account:
+            return
+        try:
+            favorite = self.preferences.toggle(hero)
+        except OSError:
+            for item in self.items:
+                if item.championId == hero:
+                    item.favoriteButton.setToolTip('收藏保存失败，请稍后重试。')
+            return
+        self.refreshPreferences()
+        self.favoriteChanged.emit(hero, favorite)
+
+    def refreshPreferences(self):
+        for item in self.items:
+            item.setPreferences(self.preferences)
 
     def setAvailable(self, choices, force=False):
         if self.available == choices and not force:
@@ -319,7 +351,60 @@ class ListTitleBar(QFrame):
         self.__setSelected(getattr(self, key + 'Label'))
 
 
+class PreferenceIcon(RoundIcon):
+    favoriteRequested = pyqtSignal(int)
+
+    def __init__(self, info, diameter, base_tooltip, parent=None, draw_favorite=True):
+        super().__init__(info.get('icon'), diameter, 2, 2, parent=parent)
+        self.hero = info['championId']
+        self.baseTooltip = base_tooltip
+        self.favorite = False
+        self.recent = False
+        self.accountReady = False
+        self.drawFavorite = draw_favorite
+
+    def setPreferences(self, preferences, mayhem=False):
+        self.favorite = self.hero in preferences.favorites
+        summary = preferences.summary(self.hero, mayhem)
+        self.recent = bool(summary)
+        self.accountReady = bool(preferences.account)
+        self.setToolTip(self.baseTooltip + '\n' + preference_text(self.favorite, summary, mayhem))
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        if not self.recent and not (self.favorite and self.drawFavorite):
+            return
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        font = painter.font()
+        font.setPixelSize(9)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(Qt.NoPen)
+        if self.recent:
+            painter.setBrush(QColor('#16827b'))
+            painter.drawRoundedRect(0, 0, 11, 11, 2, 2)
+            painter.setPen(Qt.white)
+            painter.drawText(0, 0, 11, 11, Qt.AlignCenter, '近')
+            painter.setPen(Qt.NoPen)
+        if self.favorite and self.drawFavorite:
+            painter.setBrush(QColor('#247cba'))
+            painter.drawRoundedRect(self.width() - 11, self.height() - 11, 11, 11, 2, 2)
+            painter.setPen(Qt.white)
+            painter.drawText(self.width() - 11, self.height() - 11, 11, 11, Qt.AlignCenter, '★')
+        painter.end()
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        action = menu.addAction('取消收藏' if self.favorite else '收藏英雄')
+        action.setEnabled(self.accountReady)
+        if menu.exec_(event.globalPos()) is action:
+            self.favoriteRequested.emit(self.hero)
+
+
 class ListItem(ColorAnimationFrame):
+    favoriteRequested = pyqtSignal(int)
     availableRank = 0
     opponent = False
 
@@ -355,7 +440,15 @@ class ListItem(ColorAnimationFrame):
         self.opponentLabel.setStyleSheet('color: #d04a50; font-size: 11px; font-weight: 600;')
         self.opponentLabel.setToolTip('对面已锁定 · 当前分路榜中存在该英雄，不代表已确认对方分路')
         self.opponentLabel.hide()
-        self.championIcon = RoundIcon(info.get("icon"), 28, 2, 2)
+        self.championIcon = PreferenceIcon(info, 28, self.name, draw_favorite=False)
+        self.championIcon.favoriteRequested.connect(self.favoriteRequested)
+        self.favorite = False
+        self.favoriteButton = QToolButton(self.championIcon)
+        self.favoriteButton.setGeometry(15, 15, 13, 13)
+        self.favoriteButton.setText('☆')
+        self.favoriteButton.setFocusPolicy(Qt.StrongFocus)
+        self.favoriteButton.setStyleSheet('QToolButton { background: #f3f6fa; color: #247cba; border: none; border-radius: 2px; font-size: 12px; } QToolButton:focus { border: 1px solid #247cba; }')
+        self.favoriteButton.clicked.connect(lambda _: self.favoriteRequested.emit(self.championId))
         if info.get('source') == 'tencent-101':
             self.tierLabel = BodyLabel('T' + str(info['tier']))
             self.tierLabel.setFixedWidth(28)
@@ -388,10 +481,12 @@ class ListItem(ColorAnimationFrame):
         self.countersLayout.setAlignment(Qt.AlignCenter)
 
         counters = info.get("counters")
+        self.counterIcons = []
         if counters:
             for c in counters[:3]:
-                icon = RoundIcon(c['icon'], 22, 2, 2)
-                icon.setToolTip(f"{c.get('name', str(c['championId']))} · 可用于对抗{self.name}")
+                icon = PreferenceIcon(c, 22, f"{c.get('name', str(c['championId']))} · 可用于对抗{self.name}")
+                icon.favoriteRequested.connect(self.favoriteRequested)
+                self.counterIcons.append(icon)
                 self.countersLayout.addWidget(icon)
         else:
             icon = BodyLabel("--")
@@ -457,6 +552,25 @@ class ListItem(ColorAnimationFrame):
 
     def setCounter(self, x):
         self.numberLabel.setText(str(x))
+
+    def setPreferences(self, preferences):
+        mayhem = bool(self.info.get('mayhem'))
+        self.favorite = self.championId in preferences.favorites
+        self.favoriteButton.setEnabled(bool(preferences.account))
+        self.favoriteButton.setText('★' if self.favorite else '☆')
+        self.favoriteButton.setAccessibleName(('取消收藏' if self.favorite else '收藏') + self.name)
+        self.favoriteButton.setToolTip(('取消收藏 ' if self.favorite else '收藏 ') + self.name
+            if preferences.account else '连接客户端后可收藏；收藏按账号分别保存。')
+        self.championIcon.setPreferences(preferences, mayhem)
+        for icon in self.counterIcons:
+            icon.setPreferences(preferences, mayhem)
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        action = menu.addAction('取消收藏' if self.favorite else '收藏英雄')
+        action.setEnabled(self.favoriteButton.isEnabled())
+        if menu.exec_(event.globalPos()) is action:
+            self.favoriteRequested.emit(self.championId)
 
     def __onClicked(self):
         signalBus.toOpggBuildInterface.emit(self.championId, "", "")
