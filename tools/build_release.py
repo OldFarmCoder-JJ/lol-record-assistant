@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,12 +46,28 @@ def main():
         raise SystemExit('Invalid output path.')
     output.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
+    build_env = os.environ.copy()
+    # Qt5 can replace Unicode characters with '?' in QLibraryInfo paths.
+    # PyInstaller's isolated hooks need the whole installed binding at an ASCII path.
+    import PyQt5
+    qt_source = Path(PyQt5.__file__).parent
+    if not str(qt_source).isascii():
+        qt_cache = Path(tempfile.mkdtemp(prefix='Seraphine-build-qt-'))
+        if not str(qt_cache).isascii():
+            raise SystemExit('Qt build cache requires an ASCII TEMP directory.')
+        shutil.copytree(qt_source, qt_cache / 'PyQt5')
+        build_env['PYTHONPATH'] = str(qt_cache) + (os.pathsep + build_env['PYTHONPATH'] if build_env.get('PYTHONPATH') else '')
+        subprocess.run([sys.executable, '-c',
+            'from pathlib import Path; from PyQt5.QtCore import QLibraryInfo; '
+            'assert Path(QLibraryInfo.location(QLibraryInfo.PluginsPath)).is_dir()'],
+            cwd=ROOT, env=build_env, check=True)
+        print('Qt build paths verified using an ASCII dependency copy.', flush=True)
     command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--windowed', '--name', 'Seraphine',
                '--distpath', str(output), '--workpath', str(work / 'build'), '--specpath', str(work),
                '--paths', str(source), '--icon', str(source / 'app/resource/images/logo.ico')]
     for name in ('images', 'qss', 'i18n', 'icons', 'bin'):
         command += ['--add-data', str(source / 'app/resource' / name) + os.pathsep + 'app/resource/' + name]
-    subprocess.run(command + [str(source / 'main.py')], cwd=ROOT, check=True)
+    subprocess.run(command + [str(source / 'main.py')], cwd=ROOT, env=build_env, check=True)
     folder = output / 'Seraphine'
     shutil.copyfile(ROOT / 'LICENSE', folder / 'LICENSE')
     (folder / 'VERSION.txt').write_text(version + '\n', encoding='utf-8')
