@@ -62,6 +62,7 @@ async def verify():
     window.modeComboBox.blockSignals(True)
     window.regionComboBox.blockSignals(True)
     window.personalStats.data={'records':records}
+    window.personalStats.viewCombo.setCurrentIndex(window.personalStats.viewCombo.findData('champions'))
     window.personalStats.setLane('TOP')
     window.personalStats.render()
     assert window.personalStats.table.rowCount()==2

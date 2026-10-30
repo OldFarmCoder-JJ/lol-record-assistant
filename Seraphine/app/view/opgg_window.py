@@ -2,7 +2,6 @@ import sys
 import win32api
 import traceback
 import asyncio
-import time
 
 from qasync import asyncSlot, asyncClose
 from PyQt5.QtGui import QColor, QPainter, QIcon, QShowEvent
@@ -139,6 +138,10 @@ class OpggWindow(OpggWindowBase):
         self.positionComboBox = ComboBox()
         self.bpRevision = 0
         self.bpLoading = False
+        self.clientLane = None
+        self.loadRevision = 0
+        self.requestedInterface = None
+        self.requestedMode = 'ranked'
         self.personalStats = PersonalChampionsWidget(
             lambda id: connector.manager.getChampionNameById(id) if connector.manager else str(id),
             opgg.getBPChampionIcon)
@@ -192,6 +195,8 @@ class OpggWindow(OpggWindowBase):
 
     def clearOpponents(self, *args):
         self.bpRevision += 1
+        self.loadRevision += 1
+        self.clientLane = None
         self.tierInterface.tierList.setOpponents(())
 
     def __initWindow(self):
@@ -319,8 +324,9 @@ class OpggWindow(OpggWindowBase):
         if self.stackedWidget.currentWidget() is self.personalStats:
             await self.updateAndSwitchTo(self.tierInterface, self.tierInterface)
             return
+        self.loadRevision += 1
         self.setCurrentInterface(self.personalStats)
-        if connector.lcuSess is not None and time.time() - self.personalStats.data.get('updated', 0) > 300:
+        if connector.lcuSess is not None and (self.personalStats.task is None or self.personalStats.task.done()):
             self.personalStats.requestRefresh()
 
     def __onPersonalLaneChanged(self,lane):
@@ -330,16 +336,22 @@ class OpggWindow(OpggWindowBase):
         self.positionComboBox.setCurrentIndex(self.positionComboBox.findData(lane))
         del blocker
 
-    def __onToggleButtonClicked(self, index):
-        self.stackedWidget.setCurrentIndex(index)
+    @asyncSlot(int)
+    async def __onToggleButtonClicked(self, index):
+        target = self.tierInterface if index == 0 else self.buildInterface
+        await self.updateAndSwitchTo(self.stackedWidget.currentWidget(), target)
 
     def __onStackedWidgetCurrentChanged(self):
         widget = self.stackedWidget.currentWidget()
         self.personalButton.setText('返回排行' if widget is self.personalStats else '我的英雄')
         self.setComboBoxesEnabled(True)
 
-        if widget in [self.waitingInterface, self.homeInterface]:
+        if widget is self.homeInterface:
             self.setComboBoxesEnabled(False)
+        elif widget is self.waitingInterface:
+            self.toggleButton.setEnabled(False)
+            self.searchButton.setEnabled(False)
+            self.personalButton.setEnabled(False)
         elif widget in [self.buildInterface, self.errorInterface, self.personalStats]:
             self.searchButton.setEnabled(False)
 
@@ -399,11 +411,21 @@ class OpggWindow(OpggWindowBase):
         self.tierInterface.tierList.setOpponents(opponents)
         local = next((p for p in session.get('myTeam') or [] if p.get('cellId')==session.get('localPlayerCellId')), {})
         lane = ALIASES.get((local.get('assignedPosition') or '').lower())
-        if lane:
-            # Sync personal stats without silently changing the visible ranking's lane.
+        if lane and lane != self.clientLane:
+            self.clientLane = lane
             blocker = QSignalBlocker(self.personalStats)
             self.personalStats.setLane(lane)
             del blocker
+            if self.modeComboBox.currentData() == 'ranked':
+                blocker = QSignalBlocker(self.positionComboBox)
+                self.__setComboBoxCurrentData(self.positionComboBox, lane)
+                del blocker
+                if self.stackedWidget.currentWidget() is not self.personalStats:
+                    self.__refreshRanking()
+
+    @asyncSlot()
+    async def __refreshRanking(self):
+        await self.updateAndSwitchTo(self.tierInterface, self.tierInterface)
 
     def onGameStatus(self, phase):
         if (phase == 'EndOfGame' and self.stackedWidget.currentWidget() is self.personalStats
@@ -413,6 +435,7 @@ class OpggWindow(OpggWindowBase):
         if phase == 'ChampSelect':
             self.__loadCurrentBP()
         else:
+            self.clientLane = None
             self.tierInterface.tierList.setOpponents(())
 
     @asyncSlot()
@@ -458,14 +481,27 @@ class OpggWindow(OpggWindowBase):
         if self.filterLock:
             return
 
-        # 上方 Combo box 改变的时候，相当于从自己跳转到自己
+        mode = self.modeComboBox.currentData()
+        mode_changed = mode != self.requestedMode
+        self.requestedMode = mode
+        if mode_changed and mode == 'ranked' and self.clientLane:
+            blocker = QSignalBlocker(self.positionComboBox)
+            self.__setComboBoxCurrentData(self.positionComboBox, self.clientLane)
+            del blocker
+            blocker = QSignalBlocker(self.personalStats)
+            self.personalStats.setLane(self.clientLane)
+            del blocker
+
         current = self.stackedWidget.currentWidget()
-        if current is self.personalStats:
-            if self.modeComboBox.currentData() == 'ranked':
+        if mode_changed:
+            current = self.tierInterface
+        elif current is self.personalStats:
+            if mode == 'ranked':
                 return
             current = self.tierInterface
+        elif current not in (self.tierInterface, self.buildInterface):
+            current = self.requestedInterface or self.tierInterface
 
-        self.setAutoRefreshEnabled(False)
         await self.updateAndSwitchTo(current, current)
 
     @asyncSlot(int, str, str)
@@ -489,31 +525,33 @@ class OpggWindow(OpggWindowBase):
         await self.updateAndSwitchTo(current, self.buildInterface)
 
     async def updateAndSwitchTo(self, current, to):
-        """
-        这个函数做三件事情：
-
-        1. 显示转圈界面，并锁住上方的 combo box
-        2. 尝试刷新 `to` 界面
-        3. 解锁上方的 combo box
-        4. - 若更新成功，则转到 `to` 界面
-           - 若更新失败，则转到错误界面
-        """
-
-        # 显示转圈圈界面，并且锁住上方的 combo box
-        self.setCurrentInterface(self.waitingInterface)
+        """加载最新选择；等待期间允许改选，较早请求的结果和错误均丢弃。"""
 
         # 如果是在出错的界面请求的更新，则需要知道是因为刷新了啥才进入到的出错界面
         if current is self.errorInterface:
             # 将目标界面置为进入错误界面之前的界面
             to = self.errorInterface.getFromInterface()
+        if to not in (self.tierInterface, self.buildInterface):
+            to = self.tierInterface
+        self.loadRevision += 1
+        revision = self.loadRevision
+        selection = self.__filterKey()
+        self.requestedInterface = to
+        self.requestedMode = self.modeComboBox.currentData()
+        # filterLock only batches synchronous selector changes, never network waits.
+        self.setAutoRefreshEnabled(True)
+        self.setCurrentInterface(self.waitingInterface)
 
         try:
             # 尝试刷新当前的界面
-            await self.__updateInterface(to)
+            loaded_selection = await self.__updateInterface(to, revision)
 
             # 让转圈消失，显示界面
-            self.setCurrentInterface(to)
+            if self.__requestCurrent(revision, loaded_selection or selection):
+                self.setCurrentInterface(to)
         except Exception as e:
+            if not self.__requestCurrent(revision, selection):
+                return
             stack = traceback.format_exc()
             logger.error(f"Get OPGG data failed, {stack}\n{e}", TAG)
 
@@ -532,15 +570,23 @@ class OpggWindow(OpggWindowBase):
             # 显示出错的界面
             self.setCurrentInterface(self.errorInterface)
         finally:
-            self.setAutoRefreshEnabled(True)
+            if revision == self.loadRevision:
+                self.setAutoRefreshEnabled(True)
 
-    async def __updateInterface(self, interface: QWidget):
+    def __filterKey(self):
+        return tuple(box.currentData() for box in (self.modeComboBox, self.regionComboBox,
+                                                   self.tierComboBox, self.positionComboBox))
+
+    def __requestCurrent(self, revision, selection):
+        return (revision is None or revision == self.loadRevision) and selection == self.__filterKey()
+
+    async def __updateInterface(self, interface: QWidget, revision=None):
         map = {
             self.tierInterface: self.__updateTierInterface,
             self.buildInterface: self.__updateBuildInterface
         }
 
-        await map[interface]()
+        return await map[interface](revision)
 
     def __setVersionLabel(self, data):
         text = self.tr("Version: ") + data['version']
@@ -570,7 +616,8 @@ class OpggWindow(OpggWindowBase):
                             '英雄排行与攻略')
         self.positionComboBox.setToolTip('选择分路查看英雄排行与攻略')
 
-    async def __updateTierInterface(self):
+    async def __updateTierInterface(self, revision=None):
+        selection = self.__filterKey()
         mode = self.modeComboBox.currentData()
         region = self.regionComboBox.currentData()
         tier = self.tierComboBox.currentData()
@@ -605,8 +652,7 @@ class OpggWindow(OpggWindowBase):
                 data = await opgg.getRiftAnalysis(region, tier, position,
                     fraction=analysis.fraction.currentData(), only_strong=analysis.strongOnly.isChecked(),
                     strict=analysis.strict.isChecked() and region=='consensus')
-                if (mode != self.modeComboBox.currentData() or region != self.regionComboBox.currentData()
-                        or position != self.positionComboBox.currentData()):
+                if not self.__requestCurrent(revision, selection):
                     return
                 self.__setVersionLabel(data)
                 self.tierInterface.showAnalysis(data)
@@ -621,6 +667,8 @@ class OpggWindow(OpggWindowBase):
             # 否则是第一次请求 rank 模式数据，记录一下 cache
             else:
                 data = await opgg.getTierList(region, mode, tier)
+                if not self.__requestCurrent(revision, selection):
+                    return
                 self.cachedTier = tier
                 self.cachedRegion = region
                 self.cachedRankedTierList = data
@@ -632,11 +680,14 @@ class OpggWindow(OpggWindowBase):
             data = await opgg.getTierList(region, mode, tier)
             res = data['data']
 
+        if not self.__requestCurrent(revision, selection):
+            return
         self.__setVersionLabel(data)
         self.tierInterface.showAnalysis(None)
         self.tierInterface.tierList.updateList(res)
 
-    async def __updateBuildInterface(self):
+    async def __updateBuildInterface(self, revision=None):
+        selection = self.__filterKey()
         mode = self.modeComboBox.currentData()
         region = self.regionComboBox.currentData()
         tier = self.tierComboBox.currentData()
@@ -665,7 +716,8 @@ class OpggWindow(OpggWindowBase):
         data = await opgg.getChampionBuild(region, mode, championId, position, tier)
 
         # A slower response for the previous selection must not overwrite a newer hero.
-        if (championId != self.buildInterface.getCurrentChampionId() or mode != self.modeComboBox.currentData()
+        if (not self.__requestCurrent(revision, selection)
+                or championId != self.buildInterface.getCurrentChampionId() or mode != self.modeComboBox.currentData()
                 or region != self.regionComboBox.currentData()
                 or (mode == 'ranked' and position != self.positionComboBox.currentData())):
             return
@@ -686,6 +738,8 @@ class OpggWindow(OpggWindowBase):
 
         self.__setVersionLabel(data)
 
+        return self.__filterKey()
+
     @asyncSlot(bool)
     async def __onDebugButtonClicked(self, _):
         await opgg.start()
@@ -695,7 +749,7 @@ class OpggWindow(OpggWindowBase):
         await self.initWindow()
 
     async def initWindow(self):
-        self.__onFilterTextChanged(1)
+        await self.updateAndSwitchTo(self.tierInterface, self.tierInterface)
 
     def showEvent(self, a0: QShowEvent) -> None:
         """在显示的时候，自动显示在客户端正右侧"""

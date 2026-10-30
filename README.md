@@ -11,6 +11,8 @@
 - 按账号整理个人分路英雄榜，使用顶部按钮切页查看。
 - 海克斯攻略图标优先复用本地缓存，缺图后台补齐。
 - v1.3.2：召唤师峡谷选人时，当前分路排行内的对面已锁定英雄自动置顶并加红框，保留原始名次；右侧「选谁打他」显示最多三个克制头像，悬停查看名称。适用于国服、全球与韩服普通排行，不需要搜索或手动指定对手分路。
+- 源码开发版：切换海斗/峡谷会重新显示对应排行；客户端识别本人分路后同步切换选项和列表，旧请求不会覆盖新选择。
+- 源码开发版：「我的英雄」默认显示最近20场排位的逐场英雄、胜负、分路、单双排/灵活组排和时间；重开单独标注。可切换回原分路英雄榜。客户端历史分页重复时，复用官方历史接口补读更早战绩；接口不可用或历史不足时显示实际已读取场次。
 
 当前界面已移除占据排行空间的 Counter 对位面板和局内海克斯小窗。尚未实现游戏画面中的三个候选海克斯自动识别。
 
@@ -44,6 +46,8 @@ GitHub Actions 只保留手动源码检查，不会在每次推送时自动打�
 .\.venv\Scripts\python.exe verify_compact_ranking.py
 .\.venv\Scripts\python.exe verify_opponent_ranking.py
 .\.venv\Scripts\python.exe verify_personal_history.py
+.\.venv\Scripts\python.exe verify_ranking_refresh.py
+.\.venv\Scripts\python.exe verify_recent_ranked.py
 .\.venv\Scripts\python.exe verify_github_updates.py
 .\.venv\Scripts\python.exe verify_release_update.py
 ```

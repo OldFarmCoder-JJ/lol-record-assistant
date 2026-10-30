@@ -48,6 +48,22 @@ def aggregate(records, lane, minimum=5):
     return sorted(rows,key=lambda r:(-r['winRate'],-r['games'],r['championId']))
 
 
+def recent_ranked(records, limit=20):
+    """Newest ranked matches across all lanes; retain remakes/unknown outcomes explicitly."""
+    result, seen = [], set()
+    for row in sorted(records, key=lambda r: (r.get('date') or 0, r.get('gameId') or 0), reverse=True):
+        if row.get('queue') not in (420, 440):
+            continue
+        key = row.get('key') or (row.get('queue'), row.get('gameId'))
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(row)
+        if len(result) >= limit:
+            break
+    return result
+
+
 class PersonalHistory:
     def __init__(self, connector, folder):
         self.connector, self.folder = connector, Path(folder)
@@ -66,6 +82,25 @@ class PersonalHistory:
         previous = self.cached(puuid)
         records = {r['key']:r for r in previous['records'] if isinstance(r,dict) and 'key' in r}
         read, warnings, seen, pending = 0, [], set(), []
+        repeated = False
+        def store(game):
+            nonlocal read
+            key = str(game.get('platformId',''))+':'+str(game.get('gameId'))
+            if key not in seen:
+                seen.add(key)
+                read += 1
+            row = normalize_game(game, puuid)
+            if not row:
+                warnings.append('部分场次无法确认本人，已跳过。')
+                return None
+            old = records.get(row['key'])
+            if old and row['lane'] == 'UNKNOWN' and old['lane'] != 'UNKNOWN':
+                row['lane'] = old['lane']
+            records[row['key']] = row
+            if row['queue'] == 420 and row['lane'] == 'UNKNOWN' and len(pending) < 20:
+                pending.append(row)
+            return row
+
         for start in range(0,limit,20):
             try:
                 page = await asyncio.wait_for(self.connector.getSummonerGamesByPuuid(puuid,start,min(start+19,limit-1)),12)
@@ -78,24 +113,49 @@ class PersonalHistory:
             fresh = [g for g in games if str(g.get('platformId',''))+':'+str(g.get('gameId')) not in seen]
             if not fresh:
                 if games:
+                    repeated = True
                     warnings.append(f'客户端重复返回近期 {len(games)} 场，已停止分页；后续刷新可累计新战绩。')
                 break
             for game in fresh:
-                key = str(game.get('platformId',''))+':'+str(game.get('gameId'))
-                seen.add(key)
-                read += 1
-                row = normalize_game(game,puuid)
-                if row:
-                    old = records.get(row['key'])
-                    if old and row['lane']=='UNKNOWN' and old['lane']!='UNKNOWN':
-                        row['lane'] = old['lane']
-                    records[row['key']] = row
-                    if row['queue']==420 and row['lane']=='UNKNOWN' and len(pending)<20:
-                        pending.append(row)
-                else:
-                    warnings.append('部分场次无法确认本人，已跳过。')
+                store(game)
             if len(games)<20:
                 break
+
+        # Some clients ignore page indexes and repeat their last 20 games. Reuse
+        # the authenticated official history adapter already provided by Connector.
+        official = getattr(self.connector, 'getSummonerGamesByPuuidViaSGP', None)
+        supplemented = False
+        if callable(official) and getattr(self.connector, 'inTencent', True) and (repeated or len(recent_ranked(list(records.values()))) < 20):
+            official_seen, official_ranked = set(), set()
+            for start in range(0, limit, 50):
+                try:
+                    page = await asyncio.wait_for(official(puuid, start, min(start + 49, limit - 1)), 12)
+                    games = page.get('games', []) if isinstance(page, dict) else page
+                    if not isinstance(games, list):
+                        raise ValueError('官方历史列表格式异常')
+                    added = 0
+                    for entry in games:
+                        game = entry.get('json', entry)
+                        if not isinstance(game, dict) or not game.get('gameId'):
+                            continue
+                        key = str(game.get('platformId', '')) + ':' + str(game['gameId'])
+                        if key in official_seen:
+                            continue
+                        official_seen.add(key)
+                        added += 1
+                        row = store(game)
+                        if row:
+                            supplemented = True
+                            if row['queue'] in (420, 440):
+                                official_ranked.add(key)
+                    if len(official_ranked) >= 20 or not added or len(games) < min(50, limit - start):
+                        break
+                except Exception:
+                    warnings.append('较早的排位暂未读到，已保留客户端战绩和缓存。')
+                    break
+            if supplemented:
+                warnings = [warning for warning in warnings if not warning.startswith('客户端重复返回近期')]
+
         semaphore = asyncio.Semaphore(4)
         async def enrich(row):
             try:
@@ -106,9 +166,9 @@ class PersonalHistory:
                     records[row['key']] = dict(detail,key=row['key'])
             except Exception:
                 pass  # Unknown lanes remain explicit; never guess from the hero.
-        await asyncio.gather(*(enrich(row) for row in pending))
+        await asyncio.gather(*(enrich(row) for row in pending if records[row['key']]['lane'] == 'UNKNOWN'))
         result = dict(schema=1,records=sorted(records.values(),key=lambda r:r.get('date',0),reverse=True)[:2000],
-                      updated=time.time(),read=read,warnings=list(dict.fromkeys(warnings)))
+                      updated=time.time(),read=read,supplemented=supplemented,warnings=list(dict.fromkeys(warnings)))
         self.folder.mkdir(parents=True,exist_ok=True)
         temporary = self.path(puuid).with_suffix('.tmp')
         temporary.write_text(json.dumps(result,ensure_ascii=False),encoding='utf-8')

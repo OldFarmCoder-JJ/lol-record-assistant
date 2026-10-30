@@ -92,7 +92,10 @@ async def verify():
     assigned = draft()
     assigned['myTeam'][0]['assignedPosition'] = 'top'
     window.onChampSelect(assigned)
-    assert window.positionComboBox.currentData() == 'JUNGLE'
+    await asyncio.sleep(.1)
+    assert window.positionComboBox.currentData() == 'TOP'
+    assert not any(item.opponent for item in ranking.items)
+    await load()
 
     # Repeated unrelated draft events preserve scrolling; a new lock brings its row into view.
     ranking.scrollArea.verticalScrollBar().setValue(200)
