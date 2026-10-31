@@ -43,7 +43,7 @@ class HextechDraftAssistant(QObject):
 
     def refreshBar(self, *args):
         visible = self.window.modeComboBox.currentData() == 'aram_mayhem'
-        self.bar.setVisible(visible)
+        self.bar.setVisible(visible and self.window.stackedWidget.currentWidget() is not self.window.personalStats)
         self.rankButton.setVisible(self.window.stackedWidget.currentWidget() is not self.window.tierInterface)
         self.window.tierInterface.tierList.setAvailable(self.choices if self.active and visible else {})
 
@@ -88,7 +88,7 @@ class HextechDraftAssistant(QObject):
             return
         self.rankButton.setEnabled(False)
         try:
-            await self.window.updateAndSwitchTo(self.window.tierInterface, self.window.tierInterface)
+            await self.window.showRanking()
         finally:
             self.rankButton.setEnabled(True)
 

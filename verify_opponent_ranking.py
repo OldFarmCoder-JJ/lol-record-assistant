@@ -108,7 +108,7 @@ async def verify():
     session['theirTeam'].append(dict(cellId=6, championId=64))
     session['actions'][0].append(dict(type='pick', actorCellId=6, championId=64, completed=True))
     window.onChampSelect(session)
-    await ranking._TierListWidget__onSortRequested.__wrapped__(ranking, 'winRate')
+    ranking.sortBy('winRate')
     assert [item.championId for item in ranking.items[:2]] == [64, 11]
     # New rank responses and lane changes retain only matching highlights, without changing the lane.
     await load('cn')

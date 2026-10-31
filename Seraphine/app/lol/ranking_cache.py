@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+import threading
 import time
 
 
@@ -28,6 +29,7 @@ class RankingCache:
         self.fresh_for = max(0, min(float(fresh_for), self.max_age))
         self.max_entry_bytes = max(256, int(max_entry_bytes))
         self.clock = clock
+        self._writeLock = threading.Lock()
 
     @staticmethod
     def make_key(mode, region, tier, lane, *, fraction=.30, only_strong=True, strict=False):
@@ -140,12 +142,16 @@ class RankingCache:
 
     def put(self, key, payload, *, fetched_at=None):
         """Save a successful response atomically; False never blocks live rendering."""
+        stored = self.clock() if fetched_at is None else fetched_at
+        with self._writeLock:
+            return self._put(key, payload, stored)
+
+    def _put(self, key, payload, stored):
         temporary = None
         try:
             key = self._key(key)
             if not self._payload_valid(key, payload):
                 return False
-            stored = self.clock() if fetched_at is None else fetched_at
             if (type(stored) not in (int, float) or not math.isfinite(stored) or stored < 0
                     or stored > self.clock() + 60 or self.clock() - stored > self.max_age):
                 return False
@@ -156,6 +162,12 @@ class RankingCache:
             self.folder.mkdir(parents=True, exist_ok=True)
             path = self._path(key)
             if path.is_symlink():
+                return False
+            try:
+                existing = self._decode(path, key)
+            except (OSError, ValueError, TypeError, RecursionError):
+                existing = None
+            if existing and existing['storedAt'] > stored:
                 return False
             with tempfile.NamedTemporaryFile(dir=self.folder, prefix=path.stem + '-', suffix='.tmp', delete=False) as file:
                 temporary = Path(file.name)

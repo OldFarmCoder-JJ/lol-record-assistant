@@ -29,8 +29,10 @@ async def verify():
     games += [game(15,86,True,queue=430),game(16,86,True,remake=True),game(17,86,True,lane='NONE')]
     records=[normalize_game(g,'me') for g in games]
     rows=aggregate(records,'TOP')
-    assert len(rows)==2 and rows[0]['championId']==86 and rows[0]['games']==5 and rows[0]['wins']==3
-    assert all(r['championId']!=10 for r in rows)  # Four perfect games must not pass.
+    assert len(rows)==3 and rows[0]['championId']==86 and rows[0]['games']==6 and rows[0]['wins']==3
+    assert rows[0]['remakes']==1 and rows[0]['losses']==2
+    assert next(row for row in rows if row['championId']==10)['games']==4
+    assert all('winRate' not in row for row in rows)
     assert normalize_game(game(18,lane='BOTTOM',role='DUO_SUPPORT'),'me')['lane']=='SUPPORT'
     assert normalize_game(game(19,lane='BOTTOM',role='DUO_CARRY'),'me')['lane']=='ADC'
     assert normalize_game(game(20,lane='BOTTOM',role='DUO'),'me')['lane']=='UNKNOWN'
@@ -65,8 +67,10 @@ async def verify():
     window.personalStats.viewCombo.setCurrentIndex(window.personalStats.viewCombo.findData('champions'))
     window.personalStats.setLane('TOP')
     window.personalStats.render()
-    assert window.personalStats.table.rowCount()==2
-    assert window.personalStats.table.item(0,3).text()=='60.00%'
+    assert window.personalStats.table.rowCount()==3
+    assert window.personalStats.table.item(0,1).text()=='6'
+    assert window.personalStats.table.item(0,2).text()=='3 / 2'
+    assert window.personalStats.table.horizontalHeaderItem(3).text()=='最近使用'
     window.personalStats.service=service
     window.personalStats.setAccount({'puuid':'other'})
     assert window.personalStats.table.rowCount()==0
@@ -84,7 +88,7 @@ async def verify():
     for task in window.personalStats.iconTasks.values():task.cancel()
     window.hide()
     await asyncio.sleep(.02)
-    print('PASS: threshold 4/5, self identity, wins/losses, solo queue/remakes, support/ADC/unknown, repeated pages, merge, partial failure, account isolation, light/dark layout')
+    print('PASS: no sample threshold or personal win-rate rank, self identity, wins/losses/remakes, support/ADC/unknown, repeated pages, merge, partial failure, account isolation, light/dark layout')
 
 app=QApplication([])
 loop=QEventLoop(app)

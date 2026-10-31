@@ -183,7 +183,8 @@ async def verify():
     await window.updateAndSwitchTo(window.tierInterface, window.buildInterface)
     assert window.stackedWidget.currentWidget() is window.buildInterface
     assert window.positionComboBox.currentData() == 'TOP'
-    window.hextechLive.stop()
+    window.stop()
+    await asyncio.gather(*list(window._loadTasks), return_exceptions=True)
     window.hide()
     print('PASS: actual mode switches from ranking/build/personal, home initialization, slow old replies/errors,')
     print('automatic MID/JUNGLE refresh, repeated-event deduplication, A-B-A responses and return from Mayhem.')

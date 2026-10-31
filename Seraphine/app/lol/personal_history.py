@@ -1,4 +1,4 @@
-"""Account-isolated, local-only aggregation of LCU solo/duo history."""
+"""Account-isolated match history and factual play counts."""
 import asyncio
 import hashlib
 import json
@@ -36,32 +36,46 @@ def normalize_game(game, puuid):
                        (0 < game.get('gameDuration',0) < 300))
 
 
-def aggregate(records, lane, minimum=5):
-    counts = {}
-    for row in records:
-        if row.get('queue') != 420 or row.get('remake') or row.get('win') is None or row.get('lane') != lane or not row.get('champion'):
-            continue
-        entry = counts.setdefault(row['champion'], dict(championId=row['champion'],games=0,wins=0))
-        entry['games'] += 1
-        entry['wins'] += int(row['win'])
-    rows = [dict(r,losses=r['games']-r['wins'],winRate=r['wins']/r['games']) for r in counts.values() if r['games'] >= minimum]
-    return sorted(rows,key=lambda r:(-r['winRate'],-r['games'],r['championId']))
-
-
-def recent_ranked(records, limit=20):
-    """Newest ranked matches across all lanes; retain remakes/unknown outcomes explicitly."""
+def select_records(records, queues=(420, 440), lane=None, limit=None):
+    """Newest unique games in the requested scope, including unknown outcomes."""
     result, seen = [], set()
-    for row in sorted(records, key=lambda r: (r.get('date') or 0, r.get('gameId') or 0), reverse=True):
-        if row.get('queue') not in (420, 440):
+    rows = sorted(records, key=lambda r: (r.get('date') or 0, r.get('gameId') or 0), reverse=True)
+    for index, row in enumerate(rows):
+        if row.get('queue') not in queues or (lane not in (None, 'ALL') and row.get('lane') != lane):
             continue
-        key = row.get('key') or (row.get('queue'), row.get('gameId'))
+        key = row.get('key') or ((row.get('queue'), row['gameId']) if row.get('gameId') else ('index', index))
         if key in seen:
             continue
         seen.add(key)
         result.append(row)
-        if len(result) >= limit:
+        if limit is not None and len(result) >= limit:
             break
     return result
+
+
+def aggregate(records, lane=None, queues=(420, 440)):
+    """Every played hero is visible; order by play count, then latest use."""
+    counts = {}
+    for row in select_records(records, queues, lane):
+        if not row.get('champion'):
+            continue
+        entry = counts.setdefault(row['champion'], dict(championId=row['champion'], games=0,
+            wins=0, losses=0, remakes=0, unknown=0, lastPlayed=row.get('date') or 0))
+        entry['games'] += 1
+        if row.get('remake'):
+            entry['remakes'] += 1
+        elif row.get('win') is True:
+            entry['wins'] += 1
+        elif row.get('win') is False:
+            entry['losses'] += 1
+        else:
+            entry['unknown'] += 1
+    return sorted(counts.values(), key=lambda r: (-r['games'], -r['lastPlayed'], r['championId']))
+
+
+def recent_ranked(records, limit=20):
+    """Newest ranked matches across all lanes; retain remakes/unknown outcomes explicitly."""
+    return select_records(records, limit=limit)
 
 
 class PersonalHistory:
@@ -97,7 +111,7 @@ class PersonalHistory:
             if old and row['lane'] == 'UNKNOWN' and old['lane'] != 'UNKNOWN':
                 row['lane'] = old['lane']
             records[row['key']] = row
-            if row['queue'] == 420 and row['lane'] == 'UNKNOWN' and len(pending) < 20:
+            if row['queue'] in (420, 440) and row['lane'] == 'UNKNOWN' and len(pending) < 20:
                 pending.append(row)
             return row
 

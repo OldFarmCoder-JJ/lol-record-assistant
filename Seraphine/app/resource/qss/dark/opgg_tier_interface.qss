@@ -40,5 +40,18 @@ ListItem {
 #championLabel {
     color: white;
     font: 14px 'Microsoft YaHei', 'Segoe UI';
-    padding: 6px 6px 8px 8px;
+    padding: 0;
 }
+
+#favoriteButton {
+    background: transparent;
+    color: #9baabc;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    font: 18px 'Segoe UI Symbol', 'Microsoft YaHei';
+}
+#favoriteButton[favorite="true"] { color: #71b9f3; }
+#favoriteButton:hover { background: #29435b; color: #91ccfa; }
+#favoriteButton:focus { border: 1px solid #71b9f3; }
+#favoriteButton:disabled { color: #687482; }
+#rankingDetail { color: #7cc5ba; font: 10px 'Microsoft YaHei', 'Segoe UI'; }

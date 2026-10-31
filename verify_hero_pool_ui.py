@@ -127,8 +127,9 @@ async def verify():
             await asyncio.sleep(.15)
             assert window.width() == 640 and window.tierInterface.height() > 620
             for item in ranking.items[:3]:
-                assert item.championIcon.geometry().right() < item.nameLabel.geometry().left()
-                assert item.favoriteButton.geometry().right() < item.championIcon.width()
+                assert item.championIcon.geometry().right() < item.nameWidget.geometry().left()
+                assert item.favoriteButton.parent() is item
+                assert item.favoriteButton.geometry().right() < item.championIcon.geometry().left()
                 assert item.nameLabel.width() >= item.nameLabel.fontMetrics().horizontalAdvance(item.name)
             window.grab().save(str(ROOT / f'hero-pool-{mode}-{suffix}.png'))
 
@@ -141,7 +142,7 @@ async def verify():
         await asyncio.gather(*list(stats.iconTasks.values()))
     window.hide()
     print('PASS: full-window account/cache signal wiring, direct-refresh account discovery, account isolation,')
-    print('disconnect clearing, favorites/counter overlays, unchanged ranking/Mayhem order and full-window themes/layout.')
+    print('disconnect clearing, separate favorite controls/counter rings, unchanged ranking/Mayhem order and full-window themes/layout.')
 
 
 app = QApplication([])

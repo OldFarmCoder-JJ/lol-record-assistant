@@ -13,6 +13,8 @@ class RoundIcon(QFrame):
                  borderWidth=1, drawBackground=False, enabled=True, parent=None) -> None:
         super().__init__(parent)
         self.image = QPixmap(icon)
+        self._paintKey = None
+        self._paintImage = None
 
         self.overscaled = overscaled
         self.borderWidth = borderWidth
@@ -30,16 +32,14 @@ class RoundIcon(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
 
-        width = self.image.width() - 2*self.overscaled
-        height = self.image.height() - 2*self.overscaled
-
-        image = self.image.copy(
-            self.overscaled, self.overscaled, width, height)
-
-        size = self.size() * self.devicePixelRatioF()
-        image: QPixmap = image.scaled(size,
-                                      Qt.AspectRatioMode.KeepAspectRatio,
-                                      Qt.TransformationMode.SmoothTransformation)
+        key = (self.image.cacheKey(), self.width(), self.height(), self.devicePixelRatioF(), self.overscaled)
+        if key != self._paintKey:
+            width = self.image.width() - 2*self.overscaled
+            height = self.image.height() - 2*self.overscaled
+            image = self.image.copy(self.overscaled, self.overscaled, width, height)
+            self._paintImage = image.scaled(self.size() * self.devicePixelRatioF(),
+                Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+            self._paintKey = key
 
         path = QPainterPath()
         path.addEllipse(0, 0, self.width(), self.height())
@@ -55,7 +55,7 @@ class RoundIcon(QFrame):
             painter.drawEllipse(0, 0, self.width(), self.height())
             painter.restore()
 
-        painter.drawPixmap(self.rect(), image)
+        painter.drawPixmap(self.rect(), self._paintImage)
 
         if self.borderWidth != 0 and self.enabled:
             painter.save()
@@ -70,12 +70,12 @@ class RoundIcon(QFrame):
         self.havePic = True
         self.image = QPixmap(icon)
 
-        self.repaint()
+        self.update()
 
     def setEnabeld(self, enabled):
         self.enabled = enabled
 
-        self.repaint()
+        self.update()
 
 
 class RoundIconButton(QFrame):

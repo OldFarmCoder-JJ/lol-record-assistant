@@ -121,6 +121,25 @@ def run():
         assert not cache.put(key, dict(native(), version='new'))
     assert cache.get(key)['payload'] == native()
     assert not list(folder.glob('*.tmp'))
+    # Background disk work can finish out of order. Older data may not roll back
+    # a newer exact-key snapshot, including simultaneous worker writes.
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    assert cache.put(key, dict(native(), version='newest'), fetched_at=clock.now)
+    assert not cache.put(key, dict(native(), version='older'), fetched_at=clock.now - 1)
+    assert cache.get(key)['payload']['version'] == 'newest'
+    barrier = Barrier(2)
+    def save(version, timestamp):
+        barrier.wait(timeout=5)
+        return cache.put(key, dict(native(), version=version), fetched_at=timestamp)
+    clock.now += 3
+    with ThreadPoolExecutor(max_workers=2) as workers:
+        older = workers.submit(save, 'concurrent-old', clock.now - 1)
+        newer = workers.submit(save, 'concurrent-new', clock.now)
+        older.result(timeout=5)
+        assert newer.result(timeout=5)
+    assert cache.get(key)['payload']['version'] == 'concurrent-new'
+    assert cache.put(key, native())
     blocked = folder / 'not-a-folder'
     blocked.write_text('preserve')
     assert not RankingCache(blocked, clock=clock).put(key, native())
@@ -147,7 +166,7 @@ def run():
         assert bounded.get(invalid) is None and not bounded.put(invalid, native())
     print('PASS: exact mode/source/tier/lane/rule isolation, JSON restart/deep-copy snapshots, source metadata,')
     print('Rift/Mayhem separation, public-only validation, stale/expiry/future clocks, corrupt/oversized files,')
-    print('atomic-write failure safety, entry/retention bounds and unrelated-file preservation.')
+    print('atomic-write failure safety, out-of-order/concurrent writes, entry/retention bounds and unrelated-file preservation.')
 
 
 if __name__ == '__main__':

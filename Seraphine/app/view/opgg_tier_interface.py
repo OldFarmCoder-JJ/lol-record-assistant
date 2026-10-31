@@ -1,17 +1,18 @@
-
-from PyQt5.QtWidgets import (QHBoxLayout, QWidget, QFrame, QVBoxLayout, QSpacerItem,
-                             QSizePolicy, QLabel, QHBoxLayout, QWidget, QLabel, QFrame,
-                             QVBoxLayout, QSpacerItem, QSizePolicy, QToolButton, QMenu)
-from PyQt5.QtCore import Qt, pyqtSignal, QEasingCurve
-from PyQt5.QtGui import QPixmap, QPainter, QColor, QPen
-from qasync import asyncSlot
+"""Compact rankings with reusable rows and portrait-safe preference controls."""
+from collections import OrderedDict
+import asyncio
+import time
+from PyQt5.QtWidgets import (QHBoxLayout, QWidget, QFrame, QVBoxLayout,
+                             QSizePolicy, QLabel, QToolButton, QMenu)
+from PyQt5.QtCore import Qt, pyqtSignal, QRectF
+from PyQt5.QtGui import QPainter, QColor, QPen
 
 from app.components.animation_frame import ColorAnimationFrame
 from app.components.transparent_button import TransparentButton
 from app.components.champion_icon_widget import RoundIcon, RoundedLabel
 from app.common.signals import signalBus
 from app.common.style_sheet import StyleSheet
-from app.common.qfluentwidgets import BodyLabel, SmoothScrollArea, FlowLayout, IconWidget
+from app.common.qfluentwidgets import BodyLabel, SmoothScrollArea
 from app.view.rift_analysis_widget import RiftAnalysisWidget, tier_pixmap
 from app.lol.hextech_live import champion_order
 from app.lol.champion_preferences import ChampionPreferences, preference_text
@@ -26,20 +27,16 @@ class TierInterface(QFrame):
         self.analysis = RiftAnalysisWidget()
         self.analysis.hide()
 
-        self.__initWidget()
         self.__initLayout()
 
         StyleSheet.OPGG_TIER_INTERFACE.apply(self)
-
-    def __initWidget(self):
-        pass
 
     def __initLayout(self):
         self.vBoxLayout.setContentsMargins(0, 0, 0, 0)
         self.vBoxLayout.addWidget(self.tierList)
         self.vBoxLayout.addWidget(self.analysis)
 
-    def showAnalysis(self, data=None):
+    def showAnalysis(self, data=None, context=None, staged=None):
         if data is None:
             self.analysis.data = None
         national = data is not None and data['region'] == 'cn'
@@ -47,9 +44,9 @@ class TierInterface(QFrame):
         self.tierList.setVisible(data is None or national)
         self.tierList.titleBar.winRateLabel.setText('对位胜率' if national and data['enemyId'] else self.tierList.titleBar.tr('Win Rate'))
         if national:
-            self.analysis.data = data
             ids = {row['championId'] for row in data['data']}
-            self.tierList.updateList([row for row in data['legacyRows'] if row['championId'] in ids])
+            self.tierList.updateList([row for row in data['legacyRows'] if row['championId'] in ids], context=context, staged=staged)
+            self.analysis.data = data
             self.tierList.setToolTip('腾讯 101 国服数据；梯队、胜率、登场率、禁用率和劣势对抗来自国服。'
                                     + ('胜率列为当前对手的我方对位胜率。' if data['enemyId'] else ''))
             return
@@ -68,14 +65,6 @@ class TierInterface(QFrame):
 class TierListWidget(QFrame):
     favoriteChanged = pyqtSignal(int, bool)
     def __init__(self, parent=None):
-        '''
-        英雄梯队列表组件
-
-        观前警告：
-            为了实现该死的上下对齐，该类实现中含有大量魔法数字
-            请自备降压药
-        '''
-
         super().__init__(parent)
 
         self.vBoxLayout = QVBoxLayout(self)
@@ -84,7 +73,9 @@ class TierListWidget(QFrame):
 
         self.scrollArea = SmoothScrollArea()
         self.scrollWidget = QFrame()
-        self.scrollLayout = FlowLayout(needAni=False, isTight=True)
+        # This is a single-column list. A wrapping layout repeatedly measures
+        # every child during show/hide/reparent and adds no useful behavior.
+        self.scrollLayout = QVBoxLayout(self.scrollWidget)
 
         self.allChampionShowing = True
 
@@ -92,6 +83,11 @@ class TierListWidget(QFrame):
         self.available = {}
         self.opponents = frozenset()
         self.sortKey = 'rank'
+        self._rowsData = None
+        self._rowContext = None
+        self._rowPool = OrderedDict()
+        self.maxCachedRows = 360
+        self._layoutOrder = ()
         self.preferences = ChampionPreferences(LOCAL_PATH + '/cache/champion-preferences')
 
         self.__initWidget()
@@ -101,14 +97,12 @@ class TierListWidget(QFrame):
         self.scrollArea.setObjectName("scrollArea")
         self.scrollWidget.setObjectName("scrollWidget")
 
-        self.titleBar.sortRequested.connect(self.__onSortRequested)
+        self.titleBar.sortRequested.connect(self.sortBy)
 
     def __initLayout(self):
         self.scrollLayout.setContentsMargins(0, 0, 0, 0)
         self.scrollLayout.setAlignment(Qt.AlignTop)
-        self.scrollLayout.setVerticalSpacing(3)
-        self.scrollLayout.setAnimation(450, QEasingCurve.Type.OutQuart)
-        self.scrollWidget.setLayout(self.scrollLayout)
+        self.scrollLayout.setSpacing(3)
         self.scrollArea.setWidget(self.scrollWidget)
         self.scrollArea.setWidgetResizable(True)
         self.scrollArea.setViewportMargins(6, 6, 17, 6)
@@ -119,28 +113,123 @@ class TierListWidget(QFrame):
         self.vBoxLayout.addWidget(self.titleBar)
         self.vBoxLayout.addWidget(self.scrollArea)
 
-    def updateList(self, data: list):
+    async def prepareRows(self, data, is_current):
+        """Build a cold view in short GUI-thread slices; never block input for the full list."""
+        self.validateRows(data)
+        staged = {}
+        started = time.perf_counter()
+        try:
+            for info in data:
+                if not is_current():
+                    self.discardRows(staged)
+                    return None
+                key = (bool(info.get('mayhem')), info['championId'])
+                item = self._rowPool.get(key)
+                if item is None or item.info != info:
+                    item = ListItem(0, info, self.scrollWidget)
+                    item.setParent(self.scrollWidget)
+                    item.hide()
+                    staged[key] = item
+                if time.perf_counter() - started >= .012:
+                    await asyncio.sleep(.001)
+                    started = time.perf_counter()
+            if not is_current():
+                self.discardRows(staged)
+                return None
+            return staged
+        except BaseException:
+            self.discardRows(staged)
+            raise
+
+    @staticmethod
+    def discardRows(staged):
+        for item in staged.values():
+            item.hide()
+            item.deleteLater()
+
+    def updateList(self, data: list, context=None, staged=None):
+        self.validateRows(data)
+        if data == self._rowsData and context == self._rowContext:
+            return
+        # Reuse the previous mode's rows. Source/lane changes replace only rows
+        # whose actual contents changed; the pool has a fixed upper bound.
+        prepared = []
+        for info in data:
+            key = (bool(info.get('mayhem')), info['championId'])
+            item = self._rowPool.get(key)
+            if item is None or item.info != info:
+                replacement = staged.pop(key) if staged and key in staged else ListItem(0, info, self.scrollWidget)
+                replacement.favoriteRequested.connect(self.toggleFavorite)
+                if item is not None:
+                    self.scrollLayout.removeWidget(item)
+                    item.hide()
+                    item.deleteLater()
+                item = replacement
+                self._rowPool[key] = item
+            self._rowPool.move_to_end(key)
+            prepared.append(item)
+        self.setUpdatesEnabled(False)
+        self.scrollLayout.setEnabled(False)
+        try:
+            while self.scrollLayout.count():
+                self.scrollLayout.takeAt(0).widget().hide()
+            self._layoutOrder = ()
+            self.items = prepared
+            self._rowsData = data
+            self._rowContext = context
+            self.allChampionShowing = True
+            active = set(prepared)
+            for key, item in list(self._rowPool.items()):
+                if len(self._rowPool) <= self.maxCachedRows:
+                    break
+                if item not in active:
+                    del self._rowPool[key]
+                    item.deleteLater()
+            self._configureColumns(data)
+            self.sortKey = 'rank'
+            self.titleBar.resetSelected()
+            self.setAvailable(self.available, force=True)
+            self.refreshPreferences()
+            self.scrollArea.delegate.vScrollBar.resetValue(0)
+            self.scrollArea.verticalScrollBar().setValue(0)
+        finally:
+            self.scrollLayout.setEnabled(True)
+            self.setUpdatesEnabled(True)
+
+    @staticmethod
+    def validateRows(data):
+        if not isinstance(data, list) or len(data) > 300:
+            raise ValueError('排行列表格式异常')
+        seen = set()
+        for row in data:
+            for field in ('championId', 'name', 'rank', 'tier', 'winRate', 'pickRate', 'banRate'):
+                if field not in row:
+                    raise ValueError('排行缺少字段：' + field)
+            hero = row['championId']
+            if type(hero) is not int or hero <= 0 or hero in seen or not isinstance(row['name'], str):
+                raise ValueError('排行英雄标识异常')
+            seen.add(hero)
+            if type(row['tier']) is not int or not 0 <= row['tier'] <= 5:
+                raise ValueError('排行梯队异常')
+            if type(row['rank']) is not int or row['rank'] < 1:
+                raise ValueError('排行名次异常')
+            for field in ('winRate', 'pickRate', 'banRate'):
+                value = row[field]
+                if value is not None and (type(value) not in (int, float) or not 0 <= value <= 1):
+                    raise ValueError('排行数值异常：' + field)
+            counters = row.get('counters') or []
+            if not isinstance(counters, list) or any(type(c.get('championId')) is not int for c in counters):
+                raise ValueError('克制英雄格式异常')
+
+    def _configureColumns(self, data):
         mayhem = bool(data and data[0].get('mayhem'))
-        self.titleBar.rankLabel.setFixedWidth(50 if mayhem else 36)
+        self.titleBar.rankLabel.setFixedWidth(32)
         for widget, key in ((self.titleBar.winRateLabel, 'winRate'),
                             (self.titleBar.pickRateLabel, 'pickRate'),
                             (self.titleBar.banRateLabel, 'banRate')):
-            widget.setFixedWidth(70 if mayhem else 60)
+            widget.setFixedWidth(64 if mayhem else 62 if key == 'winRate' else 54)
             widget.setVisible(not mayhem or any(row.get(key) is not None for row in data))
         self.titleBar.countersLabel.setVisible(bool(data) and not mayhem)
-        if len(self.items) != 0:
-            self.scrollLayout.takeAllWidgets()
-
-        self.scrollArea.delegate.vScrollBar.resetValue(0)
-        self.scrollArea.verticalScrollBar().setSliderPosition(0)
-
-        self.items = [ListItem(0, x) for x in data]
-        for item in self.items:
-            item.favoriteRequested.connect(self.toggleFavorite)
-        self.sortKey = 'rank'
-        self.titleBar.resetSelected()
-        self.setAvailable(self.available, force=True)
-        self.refreshPreferences()
 
     def setAccount(self, profile):
         if self.preferences.set_account(profile):
@@ -164,6 +253,8 @@ class TierListWidget(QFrame):
         self.favoriteChanged.emit(hero, favorite)
 
     def refreshPreferences(self):
+        # Hidden pooled rows refresh when they are displayed again, so account
+        # changes never leak markers and do not repaint every cached mode.
         for item in self.items:
             item.setPreferences(self.preferences)
 
@@ -184,11 +275,12 @@ class TierListWidget(QFrame):
             # Missing rates never receive a high-win-rate badge.
             item.availableRank = available_rank if selected and item.info.get('winRate') is not None else 0
             item.opponent = not mayhem and hero in self.opponents
-            suffix = (' · ' + active[hero]) if selected else ''
+            suffix = active[hero] if selected else ''
             if 0 < item.availableRank <= 3:
                 suffix += ' · TOP ' + str(item.availableRank)
-            item.nameLabel.setText(item.name + suffix)
-            item.nameLabel.setToolTip(item.name + suffix + (' · 对面已锁定' if item.opponent else ''))
+            item.availabilityText = suffix
+            item.refreshDetail()
+            item.nameLabel.setToolTip(item.name + (' · ' + suffix if suffix else '') + (' · 对面已锁定' if item.opponent else ''))
             item.opponentLabel.setVisible(item.opponent)
             item.update()
         self.__update()
@@ -215,14 +307,20 @@ class TierListWidget(QFrame):
             self.scrollArea.verticalScrollBar().setValue(0)
 
     def __update(self):
-        self.scrollLayout.removeAllWidgets()
-
+        order = tuple(self.items)
+        if order != self._layoutOrder:
+            self.scrollLayout.setEnabled(False)
+            while self.scrollLayout.count():
+                self.scrollLayout.takeAt(0)
+            for item in self.items:
+                self.scrollLayout.addWidget(item)
+                item.show()
+            self._layoutOrder = order
+            self.scrollLayout.setEnabled(True)
         for i, x in enumerate(self.items, start=1):
             x.setCounter(i if x.info.get('mayhem') else x.info.get('rank', i))
-            self.scrollLayout.addWidget(x)
 
-    @asyncSlot(str)
-    async def __onSortRequested(self, key: str):
+    def sortBy(self, key: str):
         if not self.items or not any(item.info.get(key) is not None for item in self.items):
             return
 
@@ -271,6 +369,10 @@ class ListTitleBar(QFrame):
         # self.setStyleSheet("border: 1px solid black;")
 
         self.counterLabel = QLabel("#")
+        self.favoriteLabel = QLabel('☆')
+        self.favoriteLabel.setFixedWidth(24)
+        self.favoriteLabel.setAlignment(Qt.AlignCenter)
+        self.favoriteLabel.setToolTip('收藏在独立一列；点击星标或右键英雄即可收藏。')
         self.championLabel = QLabel(self.tr("Champion"))
         self.rankLabel = TransparentButton(self.tr("Tier"))
         self.winRateLabel = TransparentButton(self.tr("Win Rate"))
@@ -285,38 +387,32 @@ class ListTitleBar(QFrame):
         self.__initLayout()
 
     def __initLayout(self):
-        self.hBoxLayout.setContentsMargins(17, 6, 28, 6)
-
+        self.hBoxLayout.setContentsMargins(14, 4, 31, 4)
+        self.hBoxLayout.setSpacing(3)
+        self.hBoxLayout.addWidget(self.favoriteLabel)
         self.hBoxLayout.addWidget(self.counterLabel, alignment=Qt.AlignCenter)
-        # self.hBoxLayout.addSpacing()
-        self.hBoxLayout.addWidget(self.championLabel, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacerItem(QSpacerItem(
-            0, 0, QSizePolicy.Expanding, QSizePolicy.Fixed))
+        self.hBoxLayout.addSpacing(28 + 3)
+        self.hBoxLayout.addWidget(self.championLabel, 1)
         self.hBoxLayout.addWidget(self.rankLabel, alignment=Qt.AlignCenter)
-        # self.hBoxLayout.addSpacing(1)
         self.hBoxLayout.addWidget(self.winRateLabel, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacing(1)
         self.hBoxLayout.addWidget(self.pickRateLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.banRateLabel, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacing(8)
         self.hBoxLayout.addWidget(self.countersLabel, alignment=Qt.AlignCenter)
 
     def __initWidget(self):
-        self.counterLabel.setFixedWidth(30)
+        self.counterLabel.setFixedWidth(26)
         self.counterLabel.setObjectName("counterLabel")
         self.counterLabel.setAlignment(Qt.AlignCenter)
         self.countersLabel.setAlignment(Qt.AlignCenter)
         self.countersLabel.setObjectName("countersLabel")
-        self.championLabel.setAlignment(Qt.AlignCenter)
+        self.championLabel.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
         self.championLabel.setObjectName("championLabel")
 
-        width = 60
-
-        self.rankLabel.setFixedWidth(36)
-        self.winRateLabel.setFixedWidth(width)
-        self.pickRateLabel.setFixedWidth(width)
-        self.banRateLabel.setFixedWidth(width)
-        self.countersLabel.setFixedWidth(80)
+        self.rankLabel.setFixedWidth(32)
+        self.winRateLabel.setFixedWidth(62)
+        self.pickRateLabel.setFixedWidth(54)
+        self.banRateLabel.setFixedWidth(54)
+        self.countersLabel.setFixedWidth(74)
 
         self.rankLabel.clicked.connect(
             lambda: self.__onSortButtonClicked("rank"))
@@ -336,6 +432,8 @@ class ListTitleBar(QFrame):
         self.sortRequested.emit(type)
 
     def __setSelected(self, widget: TransparentButton):
+        if self.selected is widget and widget.property('selected'):
+            return
         self.selected.setProperty("selected", False)
         self.selected.style().polish(self.selected)
 
@@ -355,17 +453,24 @@ class PreferenceIcon(RoundIcon):
     favoriteRequested = pyqtSignal(int)
 
     def __init__(self, info, diameter, base_tooltip, parent=None, draw_favorite=True):
-        super().__init__(info.get('icon'), diameter, 2, 2, parent=parent)
+        path = info.get('icon')
+        super().__init__(path if isinstance(path, str) else 'app/resource/images/champion-0.png',
+                         diameter, 2, 2, parent=parent)
         self.hero = info['championId']
         self.baseTooltip = base_tooltip
         self.favorite = False
         self.recent = False
         self.accountReady = False
         self.drawFavorite = draw_favorite
+        self._preferenceState = None
 
     def setPreferences(self, preferences, mayhem=False):
-        self.favorite = self.hero in preferences.favorites
         summary = preferences.summary(self.hero, mayhem)
+        state = (self.hero in preferences.favorites, bool(preferences.account), tuple(summary.items()), mayhem)
+        if state == self._preferenceState:
+            return
+        self._preferenceState = state
+        self.favorite = state[0]
         self.recent = bool(summary)
         self.accountReady = bool(preferences.account)
         self.setToolTip(self.baseTooltip + '\n' + preference_text(self.favorite, summary, mayhem))
@@ -373,26 +478,19 @@ class PreferenceIcon(RoundIcon):
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.recent and not (self.favorite and self.drawFavorite):
+        if not self.drawFavorite or not (self.recent or self.favorite):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        font = painter.font()
-        font.setPixelSize(9)
-        font.setBold(True)
-        painter.setFont(font)
-        painter.setPen(Qt.NoPen)
+        # Rings leave the entire portrait visible, including small Counter icons.
+        painter.setBrush(Qt.NoBrush)
+        rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         if self.recent:
-            painter.setBrush(QColor('#16827b'))
-            painter.drawRoundedRect(0, 0, 11, 11, 2, 2)
-            painter.setPen(Qt.white)
-            painter.drawText(0, 0, 11, 11, Qt.AlignCenter, '近')
-            painter.setPen(Qt.NoPen)
-        if self.favorite and self.drawFavorite:
-            painter.setBrush(QColor('#247cba'))
-            painter.drawRoundedRect(self.width() - 11, self.height() - 11, 11, 11, 2, 2)
-            painter.setPen(Qt.white)
-            painter.drawText(self.width() - 11, self.height() - 11, 11, 11, Qt.AlignCenter, '★')
+            painter.setPen(QPen(QColor('#16827b'), 1.5))
+            painter.drawEllipse(rect)
+        if self.favorite:
+            painter.setPen(QPen(QColor('#398fd1'), 1.5))
+            painter.drawEllipse(rect.adjusted(2, 2, -2, -2) if self.recent else rect)
         painter.end()
 
     def contextMenuEvent(self, event):
@@ -401,6 +499,21 @@ class PreferenceIcon(RoundIcon):
         action.setEnabled(self.accountReady)
         if menu.exec_(event.globalPos()) is action:
             self.favoriteRequested.emit(self.hero)
+
+
+class ElidedLabel(BodyLabel):
+    """Keep full text for tooltips/accessibility without widening the columns."""
+    def __init__(self, text='', parent=None):
+        super().__init__(parent=parent)
+        self.setText(text)
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setPen(self.palette().color(self.foregroundRole()))
+        painter.setFont(self.font())
+        painter.drawText(self.contentsRect(), Qt.AlignVCenter | Qt.AlignLeft,
+                         self.fontMetrics().elidedText(self.text(), Qt.ElideRight, self.contentsRect().width()))
 
 
 class ListItem(ColorAnimationFrame):
@@ -420,9 +533,6 @@ class ListItem(ColorAnimationFrame):
 
     def __init__(self, number, info, parent: QWidget = None):
         super().__init__(type=f"tier{info['tier']}", parent=parent)
-        # super().__init__(type="default", parent=parent)
-
-        # self.setStyleSheet("border: 1px solid black;")
         self.setFixedWidth(589)
 
         self.championId = info['championId']
@@ -435,7 +545,17 @@ class ListItem(ColorAnimationFrame):
         self.hBoxLayout = QHBoxLayout(self)
 
         self.numberLabel = BodyLabel(str(number))
-        self.nameLabel = BodyLabel(info.get("name"))
+        self.nameLabel = ElidedLabel(info.get("name"))
+        self.nameWidget = QWidget(self)
+        self.nameLayout = QVBoxLayout(self.nameWidget)
+        self.nameLayout.setContentsMargins(0, 0, 0, 0)
+        self.nameLayout.setSpacing(0)
+        self.nameLayout.addWidget(self.nameLabel)
+        self.detailLabel = ElidedLabel()
+        self.detailLabel.setObjectName('rankingDetail')
+        self.nameLayout.addWidget(self.detailLabel)
+        self.detailLabel.hide()
+        self.availabilityText = self.recentText = ''
         self.opponentLabel = QLabel('对面')
         self.opponentLabel.setStyleSheet('color: #d04a50; font-size: 11px; font-weight: 600;')
         self.opponentLabel.setToolTip('对面已锁定 · 当前分路榜中存在该英雄，不代表已确认对方分路')
@@ -443,11 +563,12 @@ class ListItem(ColorAnimationFrame):
         self.championIcon = PreferenceIcon(info, 28, self.name, draw_favorite=False)
         self.championIcon.favoriteRequested.connect(self.favoriteRequested)
         self.favorite = False
-        self.favoriteButton = QToolButton(self.championIcon)
-        self.favoriteButton.setGeometry(15, 15, 13, 13)
+        self._preferenceState = None
+        self.favoriteButton = QToolButton(self)
+        self.favoriteButton.setObjectName('favoriteButton')
+        self.favoriteButton.setFixedSize(24, 28)
         self.favoriteButton.setText('☆')
         self.favoriteButton.setFocusPolicy(Qt.StrongFocus)
-        self.favoriteButton.setStyleSheet('QToolButton { background: #f3f6fa; color: #247cba; border: none; border-radius: 2px; font-size: 12px; } QToolButton:focus { border: 1px solid #247cba; }')
         self.favoriteButton.clicked.connect(lambda _: self.favoriteRequested.emit(self.championId))
         if info.get('source') == 'tencent-101':
             self.tierLabel = BodyLabel('T' + str(info['tier']))
@@ -460,17 +581,17 @@ class ListItem(ColorAnimationFrame):
             if self.tierLabel.pixmap().isNull():
                 self.tierLabel.setPixmap(tier_pixmap(info['tier']))
 
-        if info['winRate']:
+        if info['winRate'] is not None:
             self.winRateLabel = BodyLabel(f"{info['winRate']*100:.2f}%")
         else:
             self.winRateLabel = BodyLabel("--")
 
-        if info['pickRate']:
+        if info['pickRate'] is not None:
             self.pickRateLabel = BodyLabel(f"{info['pickRate']*100:.2f}%")
         else:
             self.pickRateLabel = BodyLabel("--")
 
-        if info['banRate']:
+        if info['banRate'] is not None:
             self.banRateLabel = BodyLabel(f"{info['banRate']*100:.2f}%")
         else:
             self.banRateLabel = BodyLabel("--")
@@ -505,49 +626,37 @@ class ListItem(ColorAnimationFrame):
             self.countersLabel.hide()
 
     def __initWidget(self):
-        self.numberLabel.setFixedWidth(30)
+        self.setFixedHeight(42)
+        self.numberLabel.setFixedWidth(26)
         self.numberLabel.setAlignment(Qt.AlignCenter)
         self.winRateLabel.setAlignment(Qt.AlignCenter)
         self.pickRateLabel.setAlignment(Qt.AlignCenter)
         self.banRateLabel.setAlignment(Qt.AlignCenter)
 
-        width = 70 if self.info.get('mayhem') else 60
-
-        # self.tierLabel.setFixedWidth(50)
-        self.winRateLabel.setFixedWidth(width)
-        self.pickRateLabel.setFixedWidth(width)
-        self.banRateLabel.setFixedWidth(width)
-        self.countersLabel.setFixedWidth(80)
-
-        self.nameLabel.setContentsMargins(0, 0, 0, 2)
-        # self.tierLabel.setContentsMargins(0, 0, 0, 2)
-        # self.winRateLabel.setContentsMargins(0, 0, 0, 2)
-        # self.pickRateLabel.setContentsMargins(0, 0, 0, 2)
-        # self.banRateLabel.setContentsMargins(0, 0, 0, 2)
+        mayhem = bool(self.info.get('mayhem'))
+        self.tierLabel.setFixedWidth(32)
+        self.winRateLabel.setFixedWidth(64 if mayhem else 62)
+        self.pickRateLabel.setFixedWidth(64 if mayhem else 54)
+        self.banRateLabel.setFixedWidth(64 if mayhem else 54)
+        self.countersLabel.setFixedWidth(74)
 
         self.clicked.connect(self.__onClicked)
 
     def __initLayout(self):
-        if not self.info.get('mayhem'):
-            self.hBoxLayout.setContentsMargins(8, 6, 8, 6)
-            self.hBoxLayout.setSpacing(3)
+        self.hBoxLayout.setContentsMargins(8, 4, 8, 4)
+        self.hBoxLayout.setSpacing(3)
         self.countersLayout.setContentsMargins(0, 0, 0, 0)
         self.countersLayout.setSpacing(2)
 
+        self.hBoxLayout.addWidget(self.favoriteButton, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.numberLabel, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacing(6)
         self.hBoxLayout.addWidget(self.championIcon, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacing(6)
-        self.hBoxLayout.addWidget(self.nameLabel, alignment=Qt.AlignCenter)
+        self.hBoxLayout.addWidget(self.nameWidget, 1)
         self.hBoxLayout.addWidget(self.opponentLabel, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacerItem(QSpacerItem(
-            0, 0, QSizePolicy.Expanding, QSizePolicy.Fixed))
         self.hBoxLayout.addWidget(self.tierLabel, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacing(13)
         self.hBoxLayout.addWidget(self.winRateLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.pickRateLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.banRateLabel, alignment=Qt.AlignCenter)
-        self.hBoxLayout.addSpacing(8)
         self.hBoxLayout.addWidget(self.countersLabel, alignment=Qt.AlignCenter)
 
     def setCounter(self, x):
@@ -555,15 +664,30 @@ class ListItem(ColorAnimationFrame):
 
     def setPreferences(self, preferences):
         mayhem = bool(self.info.get('mayhem'))
-        self.favorite = self.championId in preferences.favorites
-        self.favoriteButton.setEnabled(bool(preferences.account))
-        self.favoriteButton.setText('★' if self.favorite else '☆')
-        self.favoriteButton.setAccessibleName(('取消收藏' if self.favorite else '收藏') + self.name)
-        self.favoriteButton.setToolTip(('取消收藏 ' if self.favorite else '收藏 ') + self.name
-            if preferences.account else '连接客户端后可收藏；收藏按账号分别保存。')
+        summary = preferences.summary(self.championId, mayhem)
+        state = (self.championId in preferences.favorites, bool(preferences.account), tuple(summary.items()))
+        if state != self._preferenceState:
+            self._preferenceState = state
+            self.favorite = state[0]
+            self.favoriteButton.setEnabled(state[1])
+            self.favoriteButton.setText('★' if self.favorite else '☆')
+            self.favoriteButton.setProperty('favorite', self.favorite)
+            self.favoriteButton.style().polish(self.favoriteButton)
+            self.favoriteButton.setAccessibleName(('取消收藏' if self.favorite else '收藏') + self.name)
+            self.favoriteButton.setToolTip(('取消收藏 ' if self.favorite else '收藏 ') + self.name
+                if preferences.account else '连接客户端后可收藏；收藏按账号分别保存。')
+            self.recentText = (f"近 {summary['games']} 场 · {summary['wins']}胜 {summary['losses']}负"
+                               if summary else '')
+            self.refreshDetail()
         self.championIcon.setPreferences(preferences, mayhem)
         for icon in self.counterIcons:
             icon.setPreferences(preferences, mayhem)
+
+    def refreshDetail(self):
+        text = ' · '.join(part for part in (self.availabilityText, self.recentText) if part)
+        self.detailLabel.setText(text)
+        self.detailLabel.setToolTip(text)
+        self.detailLabel.setVisible(bool(text))
 
     def contextMenuEvent(self, event):
         menu = QMenu(self)

@@ -117,7 +117,9 @@ async def verify():
         setTheme(theme, save=False)
         await asyncio.sleep(.15)
         assert all(item.width() == 589 for item in ranking.items)
-        assert all(item.favoriteButton.geometry().right() < item.championIcon.width() for item in ranking.items)
+        assert all(item.favoriteButton.parent() is item and
+                   item.favoriteButton.geometry().right() < item.championIcon.geometry().left()
+                   for item in ranking.items), 'Favorite controls must not overlap portraits'
         view.grab().save(str(ROOT / f'champion-preferences-{suffix}.png'))
 
     ranking.updateList([dict(row, mayhem=True) for row in rows])

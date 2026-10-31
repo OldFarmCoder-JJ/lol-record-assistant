@@ -74,7 +74,9 @@ async def verify():
     connector.getGameflowSession = gameflow
     connector.getChampSelectSession = draft
     await live.poll()
-    assert [item.championId for item in window.tierInterface.tierList.items] == [86, 54, 1]
+    assert [item.championId for item in window.tierInterface.tierList.items] == [86, 54, 1], (
+        [(item.championId, item.info.get('mayhem'), item.availableRank) for item in window.tierInterface.tierList.items],
+        window.rankStatus.text(), window.loadRevision)
     live.onDraft(dict(eventType='Update', data=dict(session, benchChampions=[])))
     assert live.choices == {1: '当前'}
     assert window.tierInterface.height() > 620
