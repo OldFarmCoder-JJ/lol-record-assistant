@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent
 os.environ['APPDATA'] = tempfile.mkdtemp(prefix='Seraphine-counter-navigation-')
@@ -15,7 +16,8 @@ from app.common.qt_runtime import configure_platform_plugins
 configure_platform_plugins()
 from PyQt5.QtCore import Qt, QTranslator, QPoint
 from PyQt5.QtTest import QTest
-from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QContextMenuEvent
+from PyQt5.QtWidgets import QApplication, QMenu
 from qasync import QEventLoop
 from app.common.qfluentwidgets import Theme, setTheme
 from app.common.signals import signalBus
@@ -86,9 +88,16 @@ async def verify():
         QTest.mousePress(portrait, Qt.LeftButton)
         QTest.mouseRelease(portrait, Qt.LeftButton, pos=QPoint(-4, -4))
         assert len(requests) == 5, 'Dragging outside the portrait must not activate'
+        QTest.mouseClick(portrait, Qt.RightButton)
+        QTest.mouseClick(portrait, Qt.MiddleButton)
+        assert len(requests) == 5, 'Right/middle mouse buttons must not activate the enemy row'
         assert '已禁用' in portrait.toolTip() and '点击查看攻略' in portrait.accessibleName()
         # Preference refresh must keep draft evidence; clearing draft keeps favorites.
-        ranking.toggleFavorite(19)
+        with patch.object(QMenu, 'exec_', lambda menu, pos: menu.actions()[0]):
+            event = QContextMenuEvent(QContextMenuEvent.Mouse, portrait.rect().center(),
+                                      portrait.mapToGlobal(portrait.rect().center()))
+            QApplication.sendEvent(portrait, event)
+        assert len(requests) == 5, 'Context-menu favorite must not navigate'
         assert portrait.favorite and '已收藏' in portrait.toolTip() and '已禁用' in portrait.toolTip()
         ranking.setDraftAvailability(DraftAvailability())
         assert portrait.favorite and '已禁用' not in portrait.toolTip()

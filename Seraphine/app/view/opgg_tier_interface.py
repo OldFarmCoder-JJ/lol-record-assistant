@@ -518,7 +518,7 @@ class PreferenceIcon(RoundIcon):
             self.setFocus(Qt.MouseFocusReason)
             event.accept()
         else:
-            super().mousePressEvent(event)
+            event.accept()  # Right/middle presses belong to this portrait, not the enemy row.
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -527,7 +527,7 @@ class PreferenceIcon(RoundIcon):
                 self.activated.emit(self.hero)
             event.accept()  # Do not also activate the enemy's parent row.
         else:
-            super().mouseReleaseEvent(event)
+            event.accept()  # Qt still dispatches the separate context-menu event.
 
     def keyPressEvent(self, event):
         if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
