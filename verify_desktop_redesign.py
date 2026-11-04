@@ -193,8 +193,8 @@ async def verify():
         assert '1 重开' in stats.scope.text() and '1 场结果待确认' in stats.scope.text()
         assert len(notifications) == count, 'Changing a stats filter must not republish global history'
         assert window.positionComboBox.currentData() in LANES
-        assert not any('%' in stats.table.item(r, c).text()
-                       for r in range(stats.table.rowCount()) for c in range(stats.table.columnCount()))
+        assert stats.table.item(0, 3).text() == '50.0% · 样本少'
+        assert stats.winRateCard.value.text() == '33.3%'
         stats.setLane('MID')
         assert stats.table.rowCount() == 3
         stats.queueCombo.setCurrentIndex(stats.queueCombo.findData('mayhem'))

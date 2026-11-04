@@ -98,7 +98,7 @@ async def verify():
 
     stats.setLane('MID')
     stats.viewCombo.setCurrentIndex(stats.viewCombo.findData('champions'))
-    assert stats.table.columnCount() == 5 and not stats.laneCombo.isHidden()
+    assert stats.table.columnCount() == 6 and not stats.laneCombo.isHidden()
     assert stats.table.rowCount() > 0
     stats.viewCombo.setCurrentIndex(stats.viewCombo.findData('recent'))
     assert stats.table.rowCount() == 20 and stats.table.columnCount() == 7

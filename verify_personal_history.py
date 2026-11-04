@@ -70,8 +70,9 @@ async def verify():
     assert window.personalStats.table.rowCount()==3
     assert window.personalStats.table.item(0,1).text()=='6'
     assert window.personalStats.table.item(0,2).text()=='3 / 2'
-    assert window.personalStats.table.horizontalHeaderItem(4).text()=='最近使用'
-    assert window.personalStats.table.item(0,3).text()=='—', 'Missing KDA is not a zero'
+    assert window.personalStats.table.horizontalHeaderItem(5).text()=='最近使用'
+    assert window.personalStats.table.item(0,3).text()=='60.0% · 观察中'
+    assert window.personalStats.table.item(0,4).text()=='—', 'Missing KDA is not a zero'
     window.personalStats.service=service
     window.personalStats.setAccount({'puuid':'other'})
     assert window.personalStats.table.rowCount()==0
@@ -89,7 +90,7 @@ async def verify():
     for task in window.personalStats.iconTasks.values():task.cancel()
     window.hide()
     await asyncio.sleep(.02)
-    print('PASS: no sample threshold or personal win-rate rank, self identity, wins/losses/remakes, support/ADC/unknown, repeated pages, merge, partial failure, account isolation, light/dark layout')
+    print('PASS: all heroes visible, factual win rates, self identity, wins/losses/remakes, support/ADC/unknown, repeated pages, merge, partial failure, account isolation, light/dark layout')
 
 app=QApplication([])
 loop=QEventLoop(app)

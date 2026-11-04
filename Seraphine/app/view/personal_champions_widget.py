@@ -1,24 +1,72 @@
-"""Recent games and hero usage, without sample gates or personal win-rate ranks."""
+"""Recent games and sample-aware personal champion statistics."""
 import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import time
 
-from PyQt5.QtCore import Qt, pyqtSignal, QEvent
+from PyQt5.QtCore import Qt, pyqtSignal, QEvent, QRectF
 from PyQt5.QtGui import QIcon, QColor
 from PyQt5.QtWidgets import (QWidget, QFrame, QLabel, QVBoxLayout, QHBoxLayout,
-    QTableWidgetItem, QHeaderView, QAbstractItemView)
+    QTableWidgetItem, QHeaderView, QAbstractItemView, QStyledItemDelegate,
+    QStyleOptionViewItem, QStyle, QApplication)
 from app.common.qfluentwidgets import (BodyLabel, CaptionLabel, SubtitleLabel,
     ComboBox, PushButton, TableWidget, setCustomStyleSheet, isDarkTheme, qconfig)
 from app.common.config import LOCAL_PATH
 from app.lol.connector import connector, gameIconCachePath
 from app.lol.personal_history import PersonalHistory, aggregate, select_records, nonnegative_int
+from app.lol.champion_performance import champion_performance, sort_champions
 from app.view.bp_assistant_widget import LANES
 from qfluentwidgets.common.style_sheet import CustomStyleSheet
 
 QUEUE_SCOPES = {'ranked': (420, 440), 'solo': (420,), 'flex': (440,), 'mayhem': (2400,)}
 QUEUE_NAMES = {420: '单／双排', 440: '灵活组排', 2400: '海斗'}
 BEIJING = timezone(timedelta(hours=8))
+PERFORMANCE_ROLE = Qt.UserRole + 3
+PERFORMANCE_RULES = ('胜率 = 胜场 ÷（胜场 + 负场），重开与待确认结果不计入。\n'
+    '少于5场：样本少；5–9场：观察中；所有英雄均显示胜率。\n'
+    '有效对局至少10场：≥60% 强势，≥55% 不错，≥45% 平稳，其余为待提升。\n'
+    '仅描述当前队列、分路和已读取范围的战绩，不代表完整赛季或英雄熟练度。')
+
+
+def performance_color(tone):
+    colors = {'strong': ('#13796d', '#6ccec0'), 'good': ('#1766a4', '#83bfff'),
+              'steady': ('#6252a2', '#c2afff'), 'improve': ('#a84724', '#ffb293'),
+              'neutral': ('#626973', '#b5bfca')}
+    return QColor(colors[tone][int(isDarkTheme())])
+
+
+class WinRateDelegate(QStyledItemDelegate):
+    """Paint a rate, textual badge and slim bar without per-row child widgets."""
+    def paint(self, painter, option, index):
+        performance = index.data(PERFORMANCE_ROLE)
+        if performance is None:
+            return super().paint(painter, option, index)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        opt.text = ''
+        style = opt.widget.style() if opt.widget else QApplication.style()
+        style.drawControl(QStyle.CE_ItemViewItem, opt, painter, opt.widget)
+        painter.save()
+        painter.setClipRect(option.rect)
+        rect = option.rect.adjusted(8, 2, -8, -4)
+        color = performance_color(performance.tone)
+        if option.state & QStyle.State_Selected:
+            color = option.palette.highlightedText().color()
+        painter.setPen(color)
+        text_rect = rect.adjusted(0, 0, 0, -6)
+        rate = '—' if performance.win_rate is None else f'{performance.win_rate:.1f}%'
+        painter.drawText(text_rect, Qt.AlignLeft | Qt.AlignVCenter, rate)
+        painter.drawText(text_rect, Qt.AlignRight | Qt.AlignVCenter, performance.label)
+        painter.setRenderHint(painter.Antialiasing)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor('#46505c' if isDarkTheme() else '#dce1e6'))
+        track = QRectF(rect.left(), rect.bottom() - 2, rect.width(), 3)
+        painter.drawRoundedRect(track, 1.5, 1.5)
+        if performance.win_rate is not None and performance.win_rate > 0:
+            painter.setBrush(performance_color(performance.tone))
+            painter.drawRoundedRect(QRectF(track.x(), track.y(),
+                track.width() * performance.win_rate / 100, track.height()), 1.5, 1.5)
+        painter.restore()
 
 
 def date_text(timestamp, pattern='%m-%d %H:%M'):
@@ -94,6 +142,13 @@ class PersonalChampionsWidget(QWidget):
         for lane, title in LANES[:-1]:
             self.laneCombo.addItem(title, userData=lane)
         filters.addWidget(self.laneCombo)
+        self.sortCombo = ComboBox()
+        for title, value in (('场次最多', 'games'), ('优势优先', 'advantage'),
+                             ('胜率最高', 'winrate'), ('最近使用', 'recent')):
+            self.sortCombo.addItem(title, userData=value)
+        self.sortCombo.setToolTip('优势优先：有效对局满10场的英雄在前，同组按胜率的保守估计排序，兼顾胜负与样本量。\n'
+                                 '胜率最高：直接按胜率排序；少量样本仍会显示提示。')
+        filters.addWidget(self.sortCombo)
         filters.addStretch()
         layout.addLayout(filters)
 
@@ -101,8 +156,9 @@ class PersonalChampionsWidget(QWidget):
         cards.setSpacing(8)
         self.gamesCard = StatCard('当前范围 · 对局')
         self.resultsCard = StatCard('胜利 / 失败')
+        self.winRateCard = StatCard('有效胜率')
         self.heroesCard = StatCard('使用过的英雄')
-        for card in (self.gamesCard, self.resultsCard, self.heroesCard):
+        for card in (self.gamesCard, self.resultsCard, self.winRateCard, self.heroesCard):
             cards.addWidget(card, 1)
         layout.addLayout(cards)
         self.scope = CaptionLabel()
@@ -110,6 +166,7 @@ class PersonalChampionsWidget(QWidget):
         layout.addWidget(self.scope)
 
         self.table = TableWidget()
+        self.table.setItemDelegateForColumn(3, WinRateDelegate(self.table))
         compact = 'QTableView::item { padding-left: 6px; padding-right: 6px; }'
         setCustomStyleSheet(self.table, compact, compact)
         self.table.setColumnCount(5)
@@ -143,6 +200,7 @@ class PersonalChampionsWidget(QWidget):
         self.viewCombo.currentIndexChanged.connect(self.onScopeChanged)
         self.queueCombo.currentIndexChanged.connect(self.onScopeChanged)
         self.recentLimitCombo.currentIndexChanged.connect(self.onScopeChanged)
+        self.sortCombo.currentIndexChanged.connect(self.render)
         qconfig.themeChangedFinished.connect(self.updateResultColors)
         self.render()
 
@@ -242,6 +300,7 @@ class PersonalChampionsWidget(QWidget):
         recent_limit = self.recentLimitCombo.currentData()
         self.recentLimitCombo.setVisible(recent)
         self.laneCombo.setVisible(not recent and not mayhem)
+        self.sortCombo.setVisible(not recent)
         lane = None if recent or mayhem else self.laneCombo.currentData()
         queues = QUEUE_SCOPES[self.queueCombo.currentData()]
         selected = select_records(records, queues, lane, recent_limit if recent else None)
@@ -251,7 +310,7 @@ class PersonalChampionsWidget(QWidget):
             if recent:
                 self.renderRecent(selected)
             else:
-                self.renderChampions(aggregate(selected, queues=queues))
+                self.renderChampions(sort_champions(aggregate(selected, queues=queues), self.sortCombo.currentData()))
         finally:
             self.table.setUpdatesEnabled(True)
         wins = sum(not row.get('remake') and row.get('win') is True for row in selected)
@@ -260,6 +319,9 @@ class PersonalChampionsWidget(QWidget):
         unknown = len(selected) - wins - losses - remakes
         self.gamesCard.value.setText(str(len(selected)))
         self.resultsCard.value.setText(f'{wins} / {losses}')
+        performance = champion_performance(wins, losses)
+        self.winRateCard.value.setText('—' if performance.win_rate is None else f'{performance.win_rate:.1f}%')
+        self.winRateCard.setToolTip(f'{wins} 胜 / {losses} 负，{performance.games} 场有效对局。\n' + PERFORMANCE_RULES)
         self.heroesCard.value.setText(str(len({row['champion'] for row in selected if row.get('champion')})))
         scope = f'最近 {len(selected)} 场' + ('海斗' if mayhem else '排位') if recent else f'已读取范围 · {len(selected)} 场'
         scope += f' · {wins} 胜 {losses} 负'
@@ -274,7 +336,8 @@ class PersonalChampionsWidget(QWidget):
         self.emptyLabel.setText('该范围暂无战绩\n切换队列或分路，或点击“刷新战绩”。' if records else
                                 '暂无战绩\n连接客户端后，点击右上角“刷新战绩”。')
         message = (f'不足{recent_limit}场时显示当前已读取的场次。' if recent and len(selected) < recent_limit else
-                   '按时间从新到旧。' if recent else '按使用场次排序；玩过1场也会显示。')
+                   '按时间从新到旧。' if recent else
+                   f'{self.sortCombo.currentText()}；胜率不含重开与待确认，少量样本仅供观察。')
         if self.data.get('updated'):
             message += ' 更新 ' + date_text(self.data['updated'] * 1000) + '。'
         if self.data.get('supplemented'):
@@ -287,7 +350,7 @@ class PersonalChampionsWidget(QWidget):
             '每次最多读取近期200场，本地最多保留2000场；仅代表已读取范围。\n'
             '重开单独计数，不计入胜负；未知结果不算作失败。分路未知的对局仅在全部分路中显示。\n'
             'K/D/A和时长仅展示接口已提供的数据；旧缓存缺少数据时显示“—”，刷新可补齐近期记录。\n'
-            '战绩不受排行数据源或段位影响；不以个人胜率评价英雄熟练度。')
+            '战绩不受排行数据源或段位影响。\n' + PERFORMANCE_RULES)
 
     def _heroItem(self, hero, lane=None):
         item = QTableWidgetItem(self.name_lookup(hero) if hero else '未知英雄')
@@ -307,10 +370,11 @@ class PersonalChampionsWidget(QWidget):
         self.table.setItem(row, column, item)
 
     def renderChampions(self, rows):
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(['英雄', '场次', '胜 / 负', '场均 K/D/A', '最近使用'])
-        for col, width in ((1, 48), (2, 70), (3, 128), (4, 104)):
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(['英雄', '场次', '胜 / 负', '胜率 / 表现', '场均 K/D/A', '最近使用'])
+        for col, width in ((1, 44), (2, 62), (3, 132), (4, 116), (5, 96)):
             self.table.setColumnWidth(col, width)
+        self.table.horizontalHeaderItem(3).setToolTip(PERFORMANCE_RULES)
         self.table.setToolTip('每个英雄都保留；双击查看当前分路攻略。海斗打开海斗攻略。')
         self.table.setRowCount(len(rows))
         for index, row in enumerate(rows):
@@ -318,10 +382,18 @@ class PersonalChampionsWidget(QWidget):
             details = f"{row['wins']} 胜 / {row['losses']} 负 / {row['remakes']} 重开 / {row['unknown']} 待确认"
             self._cell(index, 1, str(row['games']), tooltip=details)
             self._cell(index, 2, f"{row['wins']} / {row['losses']}", tooltip=details)
+            performance = champion_performance(row['wins'], row['losses'])
+            rate = '—' if performance.win_rate is None else f'{performance.win_rate:.1f}%'
+            self._cell(index, 3, f'{rate} · {performance.label}', tooltip=
+                f"{details}\n{performance.games} 场有效对局，胜率 {rate}。\n" + PERFORMANCE_RULES)
+            item = self.table.item(index, 3)
+            item.setData(PERFORMANCE_ROLE, performance)
+            item.setForeground(performance_color(performance.tone))
+            item.setData(Qt.AccessibleTextRole, item.text())
             count = row['combatGames']
             averages = ' / '.join(f'{row[key] / count:.1f}' for key in ('kills', 'deaths', 'assists')) if count else '—'
-            self._cell(index, 3, averages, tooltip=f'来自 {count} 场有完整KDA数据的非重开对局；缺失场次不按0计算。')
-            self._cell(index, 4, date_text(row['lastPlayed']))
+            self._cell(index, 4, averages, tooltip=f'来自 {count} 场有完整KDA数据的非重开对局；缺失场次不按0计算。')
+            self._cell(index, 5, date_text(row['lastPlayed']))
 
     def renderRecent(self, rows):
         self.table.setColumnCount(7)
@@ -357,6 +429,13 @@ class PersonalChampionsWidget(QWidget):
                 color = self.resultColor(item.text()) if item else None
                 if color:
                     item.setForeground(QColor(color))
+        else:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, 3)
+                performance = item.data(PERFORMANCE_ROLE) if item else None
+                if performance:
+                    item.setForeground(performance_color(performance.tone))
+        self.table.viewport().update()
 
     def requestIcon(self, hero):
         if not hero or hero in self.icons or hero in self.iconTasks:

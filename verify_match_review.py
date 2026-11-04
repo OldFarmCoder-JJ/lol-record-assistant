@@ -115,9 +115,9 @@ async def verify():
         assert stats.table.rowCount() == 50 and '不足100场' in stats.status.text()
         stats.queueCombo.setCurrentIndex(stats.queueCombo.findData('ranked'))
         stats.viewCombo.setCurrentIndex(stats.viewCombo.findData('champions'))
-        assert stats.recentLimitCombo.isHidden() and stats.table.columnCount() == 5
-        assert stats.table.item(0, 3).text() == '8.0 / 0.0 / 12.0'
-        assert '完整KDA' in stats.table.item(0, 3).toolTip()
+        assert stats.recentLimitCombo.isHidden() and stats.table.columnCount() == 6
+        assert stats.table.item(0, 4).text() == '8.0 / 0.0 / 12.0'
+        assert '完整KDA' in stats.table.item(0, 4).toolTip()
         for theme, suffix in ((Theme.LIGHT, 'light'), (Theme.DARK, 'dark')):
             setTheme(theme, save=False)
             for view in ('recent', 'champions'):
@@ -138,10 +138,10 @@ async def verify():
                 window.grab().save(str(ROOT / f'match-review-{view}-{suffix}.png'))
         stats.data = {'records': records}
         stats.render()
-        assert stats.table.item(0, 3).text() == '4.0 / 0.0 / 6.0'
+        assert stats.table.item(0, 4).text() == '4.0 / 0.0 / 6.0'
         stats.data = {'records': [dict(champion=11, queue=420, win=True, date=1000)]}
         stats.render()
-        assert stats.table.item(0, 3).text() == '—'
+        assert stats.table.item(0, 4).text() == '—'
         # Requests carry the queue/depth selected at request start; switching
         # accounts while a slow read finishes cannot publish the previous user.
         stats.viewCombo.setCurrentIndex(stats.viewCombo.findData('recent'))
