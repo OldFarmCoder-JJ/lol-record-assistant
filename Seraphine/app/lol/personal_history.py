@@ -2,11 +2,31 @@
 import asyncio
 import hashlib
 import json
+import math
 import time
 from pathlib import Path
 
 LANES = {'TOP':'TOP', 'JUNGLE':'JUNGLE', 'MIDDLE':'MID', 'MID':'MID',
          'BOTTOM':'ADC', 'ADC':'ADC', 'UTILITY':'SUPPORT', 'SUPPORT':'SUPPORT'}
+
+
+def nonnegative_int(value):
+    if type(value) in (int, float) and math.isfinite(value) and value >= 0 and value == int(value):
+        return int(value)
+    return None
+
+
+def merge_record(previous, current):
+    """A sparse summary must not erase a known lane or previously read stats."""
+    if not previous:
+        return current
+    result = dict(current)
+    if result.get('lane') == 'UNKNOWN' and previous.get('lane', 'UNKNOWN') != 'UNKNOWN':
+        result['lane'] = previous['lane']
+    for field in ('kills', 'deaths', 'assists', 'duration', 'win'):
+        if result.get(field) is None and previous.get(field) is not None:
+            result[field] = previous[field]
+    return result
 
 
 def normalize_game(game, puuid):
@@ -29,15 +49,20 @@ def normalize_game(game, puuid):
             lane = 'SUPPORT'  # Explicit solo/duo support role, even when lane is NONE.
     win = stats.get('win')
     win = bool(win) if isinstance(win, (bool,int)) and win in (0,1) else None
+    duration = nonnegative_int(game.get('gameDuration'))
     return dict(key=str(game.get('platformId') or '')+':'+str(game['gameId']),
                 gameId=game['gameId'], queue=game.get('queueId'), champion=player.get('championId',0),
                 lane=lane or 'UNKNOWN', win=win, date=game.get('gameCreation',0),
+                kills=nonnegative_int(stats.get('kills')), deaths=nonnegative_int(stats.get('deaths')),
+                assists=nonnegative_int(stats.get('assists')), duration=duration,
                 remake=bool(stats.get('gameEndedInEarlySurrender')) or
-                       (0 < game.get('gameDuration',0) < 300))
+                       (duration is not None and 0 < duration < 300))
 
 
 def select_records(records, queues=(420, 440), lane=None, limit=None):
     """Newest unique games in the requested scope, including unknown outcomes."""
+    if limit is not None and limit <= 0:
+        return []
     result, seen = [], set()
     rows = sorted(records, key=lambda r: (r.get('date') or 0, r.get('gameId') or 0), reverse=True)
     for index, row in enumerate(rows):
@@ -60,8 +85,14 @@ def aggregate(records, lane=None, queues=(420, 440)):
         if not row.get('champion'):
             continue
         entry = counts.setdefault(row['champion'], dict(championId=row['champion'], games=0,
-            wins=0, losses=0, remakes=0, unknown=0, lastPlayed=row.get('date') or 0))
+            wins=0, losses=0, remakes=0, unknown=0, lastPlayed=row.get('date') or 0,
+            combatGames=0, kills=0, deaths=0, assists=0))
         entry['games'] += 1
+        if not row.get('remake') and all(nonnegative_int(row.get(field)) is not None
+                                        for field in ('kills', 'deaths', 'assists')):
+            entry['combatGames'] += 1
+            for field in ('kills', 'deaths', 'assists'):
+                entry[field] += row[field]
         if row.get('remake'):
             entry['remakes'] += 1
         elif row.get('win') is True:
@@ -92,7 +123,7 @@ class PersonalHistory:
         except (OSError,ValueError,AttributeError):
             return {'records':[]}
 
-    async def refresh(self, puuid, limit=200):
+    async def refresh(self, puuid, limit=200, queues=(420, 440), target=20):
         previous = self.cached(puuid)
         records = {r['key']:r for r in previous['records'] if isinstance(r,dict) and 'key' in r}
         read, warnings, seen, pending = 0, [], set(), []
@@ -107,9 +138,7 @@ class PersonalHistory:
             if not row:
                 warnings.append('部分场次无法确认本人，已跳过。')
                 return None
-            old = records.get(row['key'])
-            if old and row['lane'] == 'UNKNOWN' and old['lane'] != 'UNKNOWN':
-                row['lane'] = old['lane']
+            row = merge_record(records.get(row['key']), row)
             records[row['key']] = row
             if row['queue'] in (420, 440) and row['lane'] == 'UNKNOWN' and len(pending) < 20:
                 pending.append(row)
@@ -139,8 +168,8 @@ class PersonalHistory:
         # the authenticated official history adapter already provided by Connector.
         official = getattr(self.connector, 'getSummonerGamesByPuuidViaSGP', None)
         supplemented = False
-        if callable(official) and getattr(self.connector, 'inTencent', True) and (repeated or len(recent_ranked(list(records.values()))) < 20):
-            official_seen, official_ranked = set(), set()
+        if callable(official) and getattr(self.connector, 'inTencent', True) and (repeated or len(select_records(list(records.values()), queues, limit=target)) < target):
+            official_seen, official_matches = set(), set()
             for start in range(0, limit, 50):
                 try:
                     page = await asyncio.wait_for(official(puuid, start, min(start + 49, limit - 1)), 12)
@@ -160,12 +189,12 @@ class PersonalHistory:
                         row = store(game)
                         if row:
                             supplemented = True
-                            if row['queue'] in (420, 440):
-                                official_ranked.add(key)
-                    if len(official_ranked) >= 20 or not added or len(games) < min(50, limit - start):
+                            if row['queue'] in queues:
+                                official_matches.add(key)
+                    if len(official_matches) >= target or not added or len(games) < min(50, limit - start):
                         break
                 except Exception:
-                    warnings.append('较早的排位暂未读到，已保留客户端战绩和缓存。')
+                    warnings.append('较早的对局暂未读到，已保留客户端战绩和缓存。')
                     break
             if supplemented:
                 warnings = [warning for warning in warnings if not warning.startswith('客户端重复返回近期')]
@@ -176,8 +205,8 @@ class PersonalHistory:
                 async with semaphore:
                     game = await asyncio.wait_for(self.connector.getGameDetailByGameId(row['gameId']),5)
                 detail = normalize_game(game,puuid)
-                if detail and detail['lane']!='UNKNOWN':
-                    records[row['key']] = dict(detail,key=row['key'])
+                if detail:
+                    records[row['key']] = merge_record(records[row['key']], dict(detail, key=row['key']))
             except Exception:
                 pass  # Unknown lanes remain explicit; never guess from the hero.
         await asyncio.gather(*(enrich(row) for row in pending if records[row['key']]['lane'] == 'UNKNOWN'))

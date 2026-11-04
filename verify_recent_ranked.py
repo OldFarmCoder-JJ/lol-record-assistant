@@ -76,12 +76,13 @@ async def verify():
     stats.setLane('MID')
     stats.render()
     assert stats.viewCombo.currentData() == 'recent' and stats.laneCombo.isHidden()
-    assert stats.table.rowCount() == 20 and stats.table.columnCount() == 5
+    assert stats.table.rowCount() == 20 and stats.table.columnCount() == 7
     assert stats.table.item(0, 0).data(Qt.UserRole) == 86
     assert stats.table.item(0, 1).text() == '失败'
     results = [stats.table.item(index, 1).text() for index in range(20)]
     assert '重开' in results and '待确认' in results and '胜利' in results
-    assert stats.table.item(1, 2).text() == '待确认'  # Unknown lane stays explicit.
+    assert stats.table.item(1, 3).text() == '待确认'  # Unknown lane stays explicit.
+    assert stats.table.item(1, 2).text() == '—', 'Old cached KDA must remain unknown'
     assert sum(result == '胜利' for result in results) == sum(row['win'] is True and not row['remake'] for row in selected)
     assert '20 场排位' in stats.scope.text()
     stats.setLane('TOP')
@@ -97,10 +98,10 @@ async def verify():
 
     stats.setLane('MID')
     stats.viewCombo.setCurrentIndex(stats.viewCombo.findData('champions'))
-    assert stats.table.columnCount() == 4 and not stats.laneCombo.isHidden()
+    assert stats.table.columnCount() == 5 and not stats.laneCombo.isHidden()
     assert stats.table.rowCount() > 0
     stats.viewCombo.setCurrentIndex(stats.viewCombo.findData('recent'))
-    assert stats.table.rowCount() == 20 and stats.table.columnCount() == 5
+    assert stats.table.rowCount() == 20 and stats.table.columnCount() == 7
     await asyncio.gather(*list(stats.iconTasks.values()))
     window.setCurrentInterface(stats)
     window.show()
@@ -110,7 +111,7 @@ async def verify():
         assert stats.table.width() > 500 and stats.height() > 600
         assert not stats.table.item(0, 0).icon().isNull()
         assert stats.refreshButton.geometry().right() < stats.width()
-        for col in range(1, 5):
+        for col in range(1, 7):
             for row in range(4):
                 index = stats.table.model().index(row, col)
                 option = QStyleOptionViewItem()

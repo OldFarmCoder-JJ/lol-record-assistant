@@ -22,6 +22,7 @@ from app.lol.champions import ChampionAlias
 from app.lol.rift_analysis import bp_snapshot
 from app.lol.draft_follow import DraftFollow
 from app.lol.ranking_cache import RankingCache
+from app.lol.draft_availability import DraftAvailability
 from app.common.logger import logger
 from app.common.config import qconfig, cfg, LOCAL_PATH
 from app.common.style_sheet import StyleSheet
@@ -153,6 +154,9 @@ class OpggWindow(OpggWindowBase):
         self.draftFollow = DraftFollow(cfg.get(cfg.autoFollowDraft))
         self.currentDraftFlow = None
         self.currentDraftSession = None
+        self._draftAvailabilityKey = None
+        self._draftAvailabilityRevision = 0
+        self._pickableTask = None
         self.rankingCache = RankingCache(LOCAL_PATH + '/cache/rankings')
         self.personalStats = PersonalChampionsWidget(
             lambda id: connector.manager.getChampionNameById(id) if connector.manager else str(id),
@@ -303,6 +307,37 @@ class OpggWindow(OpggWindowBase):
         self.tierInterface.tierList.setAccount('')
         self.__updateFollowStatus()
         self.tierInterface.tierList.setOpponents(())
+        self.clearDraftAvailability()
+
+    def clearDraftAvailability(self):
+        self._draftAvailabilityRevision += 1
+        self._draftAvailabilityKey = None
+        if self._pickableTask:
+            self._pickableTask.cancel()
+            self._pickableTask = None
+        self.tierInterface.tierList.setDraftAvailability(DraftAvailability())
+
+    def updateDraftAvailability(self, session):
+        state = DraftAvailability.from_session(session)
+        key = (session.get('gameId'), session.get('localPlayerCellId'), state.banned, state.picked)
+        if key == self._draftAvailabilityKey:
+            return  # Ignore timer/hover chatter instead of polling the client repeatedly.
+        self.clearDraftAvailability()
+        self._draftAvailabilityKey = key
+        self.tierInterface.tierList.setDraftAvailability(state)
+        if connector.lcuSess is not None and not session.get('benchEnabled') and not self._stopping:
+            revision = self._draftAvailabilityRevision
+            self._pickableTask = asyncio.create_task(self.loadDraftAvailability(session, revision))
+
+    async def loadDraftAvailability(self, session, revision):
+        try:
+            await asyncio.sleep(.15)  # Coalesce closely spaced ban/pick events.
+            pickable = await asyncio.wait_for(connector.getPickableChampionIds(), 3)
+            if revision == self._draftAvailabilityRevision and not self._stopping:
+                self.tierInterface.tierList.setDraftAvailability(
+                    DraftAvailability.from_session(session, pickable))
+        except (Exception, asyncio.CancelledError):
+            pass  # Optional endpoint: bans/picks stay visible, ownership stays unknown.
 
     def __initWindow(self):
         desktop = QApplication.desktop().availableGeometry()
@@ -544,6 +579,7 @@ class OpggWindow(OpggWindowBase):
         lane = ALIASES.get((local.get('assignedPosition') or '').lower())
         self.clientLane = lane
         self.currentDraftSession = session
+        self.updateDraftAvailability(session)
         if flow is not None:
             self.currentDraftFlow = flow
             # A fresh GET also recovers a missed WebSocket phase transition.
@@ -574,6 +610,7 @@ class OpggWindow(OpggWindowBase):
             self.clientLane = None
             self.currentDraftFlow = self.currentDraftSession = None
             self.tierInterface.tierList.setOpponents(())
+            self.clearDraftAvailability()
 
     @asyncSlot()
     async def __loadCurrentBP(self):
@@ -587,6 +624,7 @@ class OpggWindow(OpggWindowBase):
             if flow.get('phase') != 'ChampSelect':
                 if revision == self.bpRevision:
                     self.tierInterface.tierList.setOpponents(())
+                    self.clearDraftAvailability()
                 return
             session = await asyncio.wait_for(connector.getChampSelectSession(), 3)
             if revision == self.bpRevision:
@@ -715,6 +753,7 @@ class OpggWindow(OpggWindowBase):
 
     def stop(self):
         self._stopping = True
+        self.clearDraftAvailability()
         self.loadRevision += 1
         self._pendingFilterToken = None
         self.hextechLive.stop()

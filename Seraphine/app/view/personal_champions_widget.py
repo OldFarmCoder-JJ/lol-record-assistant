@@ -12,7 +12,7 @@ from app.common.qfluentwidgets import (BodyLabel, CaptionLabel, SubtitleLabel,
     ComboBox, PushButton, TableWidget, setCustomStyleSheet, isDarkTheme, qconfig)
 from app.common.config import LOCAL_PATH
 from app.lol.connector import connector, gameIconCachePath
-from app.lol.personal_history import PersonalHistory, aggregate, select_records
+from app.lol.personal_history import PersonalHistory, aggregate, select_records, nonnegative_int
 from app.view.bp_assistant_widget import LANES
 from qfluentwidgets.common.style_sheet import CustomStyleSheet
 
@@ -23,6 +23,16 @@ BEIJING = timezone(timedelta(hours=8))
 
 def date_text(timestamp, pattern='%m-%d %H:%M'):
     return datetime.fromtimestamp(timestamp / 1000, BEIJING).strftime(pattern) if timestamp else '—'
+
+
+def combat_text(record):
+    values = [nonnegative_int(record.get(key)) for key in ('kills', 'deaths', 'assists')]
+    return ' / '.join(map(str, values)) if all(value is not None for value in values) else '—'
+
+
+def duration_text(duration):
+    seconds = nonnegative_int(duration)
+    return f'{seconds // 60:02}:{seconds % 60:02}' if seconds else '—'
 
 
 class StatCard(QFrame):
@@ -66,10 +76,15 @@ class PersonalChampionsWidget(QWidget):
 
         filters = QHBoxLayout()
         self.viewCombo = ComboBox()
-        self.viewCombo.addItem('最近20场排位', userData='recent')
+        self.viewCombo.addItem('最近对局', userData='recent')
         self.viewCombo.addItem('英雄使用统计', userData='champions')
         self.viewCombo.setMinimumWidth(145)
         filters.addWidget(self.viewCombo)
+        self.recentLimitCombo = ComboBox()
+        for count in (20, 50, 100):
+            self.recentLimitCombo.addItem(f'最近{count}场', userData=count)
+        self.recentLimitCombo.setToolTip('按当前队列查看已读取的最近对局；不足时尝试补读，按实际场次展示。')
+        filters.addWidget(self.recentLimitCombo)
         self.queueCombo = ComboBox()
         for title, value in (('全部排位', 'ranked'), ('单／双排', 'solo'), ('灵活组排', 'flex'), ('海克斯大乱斗', 'mayhem')):
             self.queueCombo.addItem(title, userData=value)
@@ -125,8 +140,9 @@ class PersonalChampionsWidget(QWidget):
         self.laneCombo.currentIndexChanged.connect(self.render)
         self.laneCombo.currentIndexChanged.connect(lambda _: self.laneChanged.emit(self.laneCombo.currentData()))
         self.table.cellDoubleClicked.connect(self.chooseChampion)
-        self.viewCombo.currentIndexChanged.connect(self.render)
-        self.queueCombo.currentIndexChanged.connect(self.render)
+        self.viewCombo.currentIndexChanged.connect(self.onScopeChanged)
+        self.queueCombo.currentIndexChanged.connect(self.onScopeChanged)
+        self.recentLimitCombo.currentIndexChanged.connect(self.onScopeChanged)
         qconfig.themeChangedFinished.connect(self.updateResultColors)
         self.render()
 
@@ -176,10 +192,19 @@ class PersonalChampionsWidget(QWidget):
             self.task.cancel()
         self.task = asyncio.create_task(self.refresh(self.serial))
 
+    def onScopeChanged(self, *args):
+        self.render()
+        if (self.viewCombo.currentData() == 'recent' and self.puuid and connector.lcuSess is not None
+                and len(select_records(self.data['records'], QUEUE_SCOPES[self.queueCombo.currentData()]))
+                < self.recentLimitCombo.currentData()):
+            self.requestRefresh()
+
     async def refresh(self, serial):
         self.refreshButton.setEnabled(False)
         self.status.setText('正在读取近期对局，整理战绩统计…')
         account_revision = self.accountRevision
+        queues = QUEUE_SCOPES[self.queueCombo.currentData()]
+        target = self.recentLimitCombo.currentData() if self.viewCombo.currentData() == 'recent' else 20
         try:
             profile = await asyncio.wait_for(connector.getCurrentSummoner(), 6)
             if serial != self.serial or account_revision != self.accountRevision:
@@ -190,7 +215,9 @@ class PersonalChampionsWidget(QWidget):
             puuid = self.puuid
             if not puuid:
                 raise ValueError('未获取到当前账号')
-            data = await self.service.refresh(puuid)
+            # The normal 20-game scope retains the existing adapter contract.
+            data = await (self.service.refresh(puuid) if queues == (420, 440) and target == 20 else
+                          self.service.refresh(puuid, queues=queues, target=target))
             if serial == self.serial and puuid == self.puuid:
                 self.data = data
                 self.render()
@@ -212,11 +239,12 @@ class PersonalChampionsWidget(QWidget):
             self.historyChanged.emit(records)
         recent = self.viewCombo.currentData() == 'recent'
         mayhem = self.queueCombo.currentData() == 'mayhem'
-        self.viewCombo.setItemText(0, '最近20场海斗' if mayhem else '最近20场排位')
+        recent_limit = self.recentLimitCombo.currentData()
+        self.recentLimitCombo.setVisible(recent)
         self.laneCombo.setVisible(not recent and not mayhem)
         lane = None if recent or mayhem else self.laneCombo.currentData()
         queues = QUEUE_SCOPES[self.queueCombo.currentData()]
-        selected = select_records(records, queues, lane, 20 if recent else None)
+        selected = select_records(records, queues, lane, recent_limit if recent else None)
         self.table.setUpdatesEnabled(False)
         try:
             self.table.clearContents()
@@ -245,7 +273,7 @@ class PersonalChampionsWidget(QWidget):
         self.emptyLabel.setVisible(not selected)
         self.emptyLabel.setText('该范围暂无战绩\n切换队列或分路，或点击“刷新战绩”。' if records else
                                 '暂无战绩\n连接客户端后，点击右上角“刷新战绩”。')
-        message = ('不足20场时显示当前已读取的场次。' if recent and len(selected) < 20 else
+        message = (f'不足{recent_limit}场时显示当前已读取的场次。' if recent and len(selected) < recent_limit else
                    '按时间从新到旧。' if recent else '按使用场次排序；玩过1场也会显示。')
         if self.data.get('updated'):
             message += ' 更新 ' + date_text(self.data['updated'] * 1000) + '。'
@@ -258,10 +286,12 @@ class PersonalChampionsWidget(QWidget):
         self.status.setToolTip(f'当前账号已读取 {len(records)} 场，{span}。\n'
             '每次最多读取近期200场，本地最多保留2000场；仅代表已读取范围。\n'
             '重开单独计数，不计入胜负；未知结果不算作失败。分路未知的对局仅在全部分路中显示。\n'
+            'K/D/A和时长仅展示接口已提供的数据；旧缓存缺少数据时显示“—”，刷新可补齐近期记录。\n'
             '战绩不受排行数据源或段位影响；不以个人胜率评价英雄熟练度。')
 
     def _heroItem(self, hero, lane=None):
         item = QTableWidgetItem(self.name_lookup(hero) if hero else '未知英雄')
+        item.setToolTip(item.text())
         item.setData(Qt.UserRole, hero)
         item.setData(Qt.UserRole + 1, lane)
         item.setIcon(QIcon(self.icons.get(hero) or gameIconCachePath('champion', hero)))
@@ -277,9 +307,9 @@ class PersonalChampionsWidget(QWidget):
         self.table.setItem(row, column, item)
 
     def renderChampions(self, rows):
-        self.table.setColumnCount(4)
-        self.table.setHorizontalHeaderLabels(['英雄', '场次', '胜 / 负', '最近使用'])
-        for col, width in ((1, 65), (2, 95), (3, 112)):
+        self.table.setColumnCount(5)
+        self.table.setHorizontalHeaderLabels(['英雄', '场次', '胜 / 负', '场均 K/D/A', '最近使用'])
+        for col, width in ((1, 48), (2, 70), (3, 128), (4, 104)):
             self.table.setColumnWidth(col, width)
         self.table.setToolTip('每个英雄都保留；双击查看当前分路攻略。海斗打开海斗攻略。')
         self.table.setRowCount(len(rows))
@@ -288,12 +318,15 @@ class PersonalChampionsWidget(QWidget):
             details = f"{row['wins']} 胜 / {row['losses']} 负 / {row['remakes']} 重开 / {row['unknown']} 待确认"
             self._cell(index, 1, str(row['games']), tooltip=details)
             self._cell(index, 2, f"{row['wins']} / {row['losses']}", tooltip=details)
-            self._cell(index, 3, date_text(row['lastPlayed']))
+            count = row['combatGames']
+            averages = ' / '.join(f'{row[key] / count:.1f}' for key in ('kills', 'deaths', 'assists')) if count else '—'
+            self._cell(index, 3, averages, tooltip=f'来自 {count} 场有完整KDA数据的非重开对局；缺失场次不按0计算。')
+            self._cell(index, 4, date_text(row['lastPlayed']))
 
     def renderRecent(self, rows):
-        self.table.setColumnCount(5)
-        self.table.setHorizontalHeaderLabels(['英雄', '结果', '分路', '队列', '时间'])
-        for col, width in ((1, 64), (2, 60), (3, 80), (4, 108)):
+        self.table.setColumnCount(7)
+        self.table.setHorizontalHeaderLabels(['英雄', '结果', 'K / D / A', '分路', '队列', '时长', '时间'])
+        for col, width in ((1, 60), (2, 100), (3, 60), (4, 72), (5, 52), (6, 104)):
             self.table.setColumnWidth(col, width)
         self.table.setToolTip('按时间从新到旧；双击查看该场英雄攻略。')
         self.table.setRowCount(len(rows))
@@ -306,9 +339,11 @@ class PersonalChampionsWidget(QWidget):
                        else '失败' if row.get('win') is False else '待确认')
             color = self.resultColor(outcome)
             self._cell(index, 1, outcome, color)
-            self._cell(index, 2, lanes.get(row.get('lane'), '未知'))
-            self._cell(index, 3, QUEUE_NAMES[row['queue']])
-            self._cell(index, 4, date_text(row.get('date')))
+            self._cell(index, 2, combat_text(row), tooltip='击杀 / 死亡 / 助攻；缺失数据不按0计算。')
+            self._cell(index, 3, lanes.get(row.get('lane'), '未知'))
+            self._cell(index, 4, QUEUE_NAMES[row['queue']])
+            self._cell(index, 5, duration_text(row.get('duration')), tooltip='对局时长，单位：分:秒')
+            self._cell(index, 6, date_text(row.get('date')), tooltip=date_text(row.get('date'), '%Y-%m-%d %H:%M'))
 
     @staticmethod
     def resultColor(outcome):

@@ -808,6 +808,17 @@ class LolClientConnector(QObject):
         res = await self.__get("/lol-champ-select/v1/session")
         return await res.json()
 
+    async def getPickableChampionIds(self):
+        """Optional read-only capability; unsupported clients must fail quietly."""
+        res = await self.__get('/lol-champ-select/v1/pickable-champion-ids')
+        if res.status != 200:
+            res.release()
+            return None
+        data = await res.json()
+        if not isinstance(data, list) or any(type(hero) is not int or hero <= 0 for hero in data):
+            return None
+        return data
+
     @retry()
     async def getGameQueues(self):
         res = await self.__get("/lol-game-queues/v1/queues")

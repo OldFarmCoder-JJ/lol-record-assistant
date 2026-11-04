@@ -16,6 +16,7 @@ from app.common.qfluentwidgets import BodyLabel, SmoothScrollArea
 from app.view.rift_analysis_widget import RiftAnalysisWidget, tier_pixmap
 from app.lol.hextech_live import champion_order
 from app.lol.champion_preferences import ChampionPreferences, preference_text
+from app.lol.draft_availability import DraftAvailability, STATUS_TEXT
 from app.common.config import LOCAL_PATH
 
 
@@ -89,6 +90,7 @@ class TierListWidget(QFrame):
         self.maxCachedRows = 360
         self._layoutOrder = ()
         self.preferences = ChampionPreferences(LOCAL_PATH + '/cache/champion-preferences')
+        self.draftAvailability = DraftAvailability()
 
         self.__initWidget()
         self.__initLayout()
@@ -190,6 +192,7 @@ class TierListWidget(QFrame):
             self.titleBar.resetSelected()
             self.setAvailable(self.available, force=True)
             self.refreshPreferences()
+            self.refreshDraftAvailability()
             self.scrollArea.delegate.vScrollBar.resetValue(0)
             self.scrollArea.verticalScrollBar().setValue(0)
         finally:
@@ -257,6 +260,18 @@ class TierListWidget(QFrame):
         # changes never leak markers and do not repaint every cached mode.
         for item in self.items:
             item.setPreferences(self.preferences)
+
+    def setDraftAvailability(self, availability):
+        if availability != self.draftAvailability:
+            self.draftAvailability = availability
+            self.refreshDraftAvailability()
+
+    def refreshDraftAvailability(self):
+        for item in self.items:
+            # Mayhem choices have their own bench/current-hero semantics.
+            state = DraftAvailability() if item.info.get('mayhem') else self.draftAvailability
+            for icon in item.counterIcons:
+                icon.setDraftStatus(state.status(icon.hero))
 
     def setAvailable(self, choices, force=False):
         if self.available == choices and not force:
@@ -379,7 +394,8 @@ class ListTitleBar(QFrame):
         self.pickRateLabel = TransparentButton(self.tr("Pick Rate"))
         self.banRateLabel = TransparentButton(self.tr("Ban Rate"))
         self.countersLabel = QLabel('选谁打他')
-        self.countersLabel.setToolTip('头像为该行英雄较难应对的英雄；胜率列仍为该行英雄的整体胜率。')
+        self.countersLabel.setToolTip('点击头像查看该英雄攻略；红色虚线环为已禁用，灰色虚线环为已选或暂不可选。\n'
+            '悬停查看已确认状态、收藏和近期战绩；仍可打开不可选英雄的攻略。胜率列为该行英雄整体胜率。')
 
         self.selected: TransparentButton = self.rankLabel
 
@@ -451,6 +467,7 @@ class ListTitleBar(QFrame):
 
 class PreferenceIcon(RoundIcon):
     favoriteRequested = pyqtSignal(int)
+    activated = pyqtSignal(int)
 
     def __init__(self, info, diameter, base_tooltip, parent=None, draw_favorite=True):
         path = info.get('icon')
@@ -463,6 +480,12 @@ class PreferenceIcon(RoundIcon):
         self.accountReady = False
         self.drawFavorite = draw_favorite
         self._preferenceState = None
+        self.preferenceTooltip = ''
+        self.draftStatus = ''
+        self._pressed = False
+        self.setCursor(Qt.PointingHandCursor)
+        self.setFocusPolicy(Qt.StrongFocus)
+        self.refreshTooltip()
 
     def setPreferences(self, preferences, mayhem=False):
         summary = preferences.summary(self.hero, mayhem)
@@ -473,24 +496,78 @@ class PreferenceIcon(RoundIcon):
         self.favorite = state[0]
         self.recent = bool(summary)
         self.accountReady = bool(preferences.account)
-        self.setToolTip(self.baseTooltip + '\n' + preference_text(self.favorite, summary, mayhem))
+        self.preferenceTooltip = preference_text(self.favorite, summary, mayhem)
+        self.refreshTooltip()
+        self.update()
+
+    def setDraftStatus(self, status):
+        if status != self.draftStatus:
+            self.draftStatus = status
+            self.refreshTooltip()
+            self.update()
+
+    def refreshTooltip(self):
+        parts = [self.baseTooltip, STATUS_TEXT[self.draftStatus], self.preferenceTooltip,
+                 '点击查看攻略 · 右键收藏']
+        self.setToolTip('\n'.join(part for part in parts if part))
+        self.setAccessibleName(self.toolTip().replace('\n', '，'))
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._pressed = True
+            self.setFocus(Qt.MouseFocusReason)
+            event.accept()
+        else:
+            super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            pressed, self._pressed = self._pressed, False
+            if pressed and self.rect().contains(event.pos()):
+                self.activated.emit(self.hero)
+            event.accept()  # Do not also activate the enemy's parent row.
+        else:
+            super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() in (Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space):
+            if not event.isAutoRepeat():
+                self.activated.emit(self.hero)
+            event.accept()
+        else:
+            super().keyPressEvent(event)
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.update()
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
         self.update()
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if not self.drawFavorite or not (self.recent or self.favorite):
+        blocked = self.draftStatus in ('banned', 'picked', 'unavailable')
+        if not blocked and not self.hasFocus() and (not self.drawFavorite or not (self.recent or self.favorite)):
             return
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         # Rings leave the entire portrait visible, including small Counter icons.
         painter.setBrush(Qt.NoBrush)
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        if self.recent:
+        if self.drawFavorite and self.recent:
             painter.setPen(QPen(QColor('#16827b'), 1.5))
             painter.drawEllipse(rect)
-        if self.favorite:
+        if self.drawFavorite and self.favorite:
             painter.setPen(QPen(QColor('#398fd1'), 1.5))
             painter.drawEllipse(rect.adjusted(2, 2, -2, -2) if self.recent else rect)
+        if blocked:
+            painter.setPen(QPen(QColor('#df6777') if self.draftStatus == 'banned' else QColor('#8c939d'),
+                                2, Qt.DashLine))
+            painter.drawEllipse(rect)
+        if self.hasFocus():
+            painter.setPen(QPen(self.palette().highlight().color(), 1, Qt.DotLine))
+            painter.drawRect(QRectF(self.rect()).adjusted(.5, .5, -.5, -.5))
         painter.end()
 
     def contextMenuEvent(self, event):
@@ -562,6 +639,7 @@ class ListItem(ColorAnimationFrame):
         self.opponentLabel.hide()
         self.championIcon = PreferenceIcon(info, 28, self.name, draw_favorite=False)
         self.championIcon.favoriteRequested.connect(self.favoriteRequested)
+        self.championIcon.activated.connect(self.openChampion)
         self.favorite = False
         self._preferenceState = None
         self.favoriteButton = QToolButton(self)
@@ -607,6 +685,7 @@ class ListItem(ColorAnimationFrame):
             for c in counters[:3]:
                 icon = PreferenceIcon(c, 22, f"{c.get('name', str(c['championId']))} · 可用于对抗{self.name}")
                 icon.favoriteRequested.connect(self.favoriteRequested)
+                icon.activated.connect(self.openChampion)
                 self.counterIcons.append(icon)
                 self.countersLayout.addWidget(icon)
         else:
@@ -698,3 +777,6 @@ class ListItem(ColorAnimationFrame):
 
     def __onClicked(self):
         signalBus.toOpggBuildInterface.emit(self.championId, "", "")
+
+    def openChampion(self, champion_id):
+        signalBus.toOpggBuildInterface.emit(champion_id, '', '')
