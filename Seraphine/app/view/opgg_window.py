@@ -20,7 +20,8 @@ from app.lol.connector import connector
 from app.lol.opgg import opgg
 from app.lol.champions import ChampionAlias
 from app.lol.rift_analysis import bp_snapshot
-from app.lol.draft_follow import DraftFollow
+from app.lol.draft_follow import DraftFollow, draft_target
+from app.lol.draft_master import locked_teams, recommend
 from app.lol.ranking_cache import RankingCache
 from app.lol.draft_availability import DraftAvailability
 from app.common.logger import logger
@@ -178,6 +179,11 @@ class OpggWindow(OpggWindowBase):
         self.waitingInterface = WaitingInterface()
         self.errorInterface = ErrorInterface()
         self.homeInterface = HomeInterface()
+        self.masterLabel = BodyLabel()
+        self.masterLabel.setWordWrap(True)
+        self.masterLabel.setTextFormat(Qt.PlainText)
+        self.masterLabel.setContentsMargins(8, 4, 8, 4)
+        self.masterLabel.hide()
         self.statusBar = QWidget()
         status_layout = QHBoxLayout(self.statusBar)
         status_layout.setContentsMargins(4, 0, 4, 0)
@@ -230,12 +236,62 @@ class OpggWindow(OpggWindowBase):
         signalBus.gameStatusChanged.connect(self.onGameStatus)
         signalBus.lolClientEnded.connect(self.clearOpponents)
         signalBus.lolClientChanged.connect(self.clearOpponents)
+        self.tierInterface.tierList.favoriteChanged.connect(self.refreshDraftMaster)
+        for combo in (self.modeComboBox, self.regionComboBox, self.positionComboBox, self.tierComboBox):
+            combo.currentIndexChanged.connect(self.refreshDraftMaster)
         self.__updateFollowStatus()
+
+    def refreshDraftMaster(self, *args):
+        session = self.currentDraftSession or {}
+        target = draft_target(self.currentDraftFlow, session)
+        if (not target or target['mode'] != 'ranked' or self.modeComboBox.currentData() != 'ranked'
+                or self._stopping or not session):
+            self.masterLabel.hide()
+            return
+        enemies, allies, assigned, locked = locked_teams(session)
+        if locked:
+            self.masterLabel.hide()
+            return
+        lane = assigned or self.positionComboBox.currentData()
+        lane_text = self.positionComboBox.itemText(self.positionComboBox.findData(lane))
+        header = f'BP大师 · {lane_text} · 敌方已锁 {len(enemies)} 人'
+        if not assigned:
+            header += ' · 手选分路'
+        tier_list = self.tierInterface.tierList
+        rows = []
+        payload = self._displayedTierPayload or {}
+        if payload and self.displayedRankingKey == self.__rankingKey():
+            if payload.get('source') == 'rift-analysis':
+                if payload.get('position') == lane:
+                    rows = payload.get('legacyRows') or [
+                        dict(championId=r['championId'], name=r['name'],
+                             rank=i, counters=[{'championId': h} for h in
+                                 r['evidence'].get('cn', {}).get('counterIds', [])])
+                        for i, r in enumerate(payload['data'], 1)]
+            elif isinstance(payload.get('data'), dict):
+                rows = payload['data'].get(lane, [])
+        lines = []
+        if enemies:
+            def name(hero):
+                return connector.manager.getChampionNameById(hero) if connector.manager else str(hero)
+            picks = recommend(lane, enemies, allies, tier_list.draftAvailability,
+                              tier_list.preferences, rows, name)
+            header += ' · ' + ('结合分路榜' if rows else '常见英雄参考')
+            if tier_list.draftAvailability.pickable is None:
+                header += ' · 可选待确认'
+            lines = [f'{i}. {label}　{reason}' for i, (label, reason) in enumerate(picks, 1)]
+            if not lines:
+                lines.append('当前候选里暂无合适推荐')
+        else:
+            lines.append('等待对面锁定英雄')
+        self.masterLabel.setText('\n'.join([header, *lines]))
+        self.masterLabel.show()
 
     def __onAccount(self, profile):
         previous = self.personalStats.puuid
         self.tierInterface.tierList.setAccount(profile)
         self.personalStats.setAccount(profile)
+        self.refreshDraftMaster()
         if (self.personalStats.puuid and self.personalStats.puuid != previous
                 and connector.lcuSess is not None
                 and time.time() - self.personalStats.data.get('updated', 0) > 300):
@@ -244,6 +300,7 @@ class OpggWindow(OpggWindowBase):
     def __onPersonalHistory(self, records):
         self.tierInterface.tierList.setAccount(self.personalStats.puuid)
         self.tierInterface.tierList.setRecent(records)
+        self.refreshDraftMaster()
 
     def __updateFollowStatus(self):
         paused = self.draftFollow.enabled and self.draftFollow.suspended
@@ -316,6 +373,7 @@ class OpggWindow(OpggWindowBase):
             self._pickableTask.cancel()
             self._pickableTask = None
         self.tierInterface.tierList.setDraftAvailability(DraftAvailability())
+        self.masterLabel.hide()
 
     def updateDraftAvailability(self, session):
         state = DraftAvailability.from_session(session)
@@ -336,6 +394,7 @@ class OpggWindow(OpggWindowBase):
             if revision == self._draftAvailabilityRevision and not self._stopping:
                 self.tierInterface.tierList.setDraftAvailability(
                     DraftAvailability.from_session(session, pickable))
+                self.refreshDraftMaster()
         except (Exception, asyncio.CancelledError):
             pass  # Optional endpoint: bans/picks stay visible, ownership stays unknown.
 
@@ -461,6 +520,7 @@ class OpggWindow(OpggWindowBase):
         self.vBoxLayout.setAlignment(Qt.AlignTop)
         self.vBoxLayout.addLayout(self.filterLayout)
         self.vBoxLayout.addWidget(self.statusBar)
+        self.vBoxLayout.addWidget(self.masterLabel)
         self.vBoxLayout.addWidget(self.stackedWidget,1)
 
     @asyncSlot()
@@ -592,6 +652,7 @@ class OpggWindow(OpggWindowBase):
             self.__applyDraftFollow(self.currentDraftFlow, session, follow_revision)
         elif connector.lcuSess is not None:
             self.__loadCurrentBP()
+        self.refreshDraftMaster()
 
     @asyncSlot()
     async def __refreshRanking(self):
@@ -623,6 +684,7 @@ class OpggWindow(OpggWindowBase):
             flow = await asyncio.wait_for(connector.getGameflowSession(), 3)
             if flow.get('phase') != 'ChampSelect':
                 if revision == self.bpRevision:
+                    self.currentDraftFlow = self.currentDraftSession = None
                     self.tierInterface.tierList.setOpponents(())
                     self.clearDraftAvailability()
                 return
@@ -906,6 +968,7 @@ class OpggWindow(OpggWindowBase):
             self.__setVersionLabel(data)
             self.displayedRankingKey = key
             self._displayedTierPayload = copy.deepcopy(payload)
+            self.refreshDraftMaster()
             return True
         finally:
             self.tierInterface.tierList.discardRows(staged)

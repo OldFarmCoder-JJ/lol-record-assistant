@@ -60,6 +60,7 @@ class MainWindow(FluentWindow):
     showUpdateMessageBox = pyqtSignal(dict)
     showNoticeMessageBox = pyqtSignal(str)
     checkUpdateFailed = pyqtSignal()
+    noNewVersion = pyqtSignal()
     fetchNoticeFailed = pyqtSignal()
 
     def __init__(self):
@@ -105,8 +106,8 @@ class MainWindow(FluentWindow):
 
         self.__initInterface()
         self.__initNavigation()
-        self.__initListener()
         self.__conncetSignalToSlot()
+        self.__initListener()
         self.__autoStartLolClient()
 
         self.splashScreen.finish()
@@ -253,6 +254,10 @@ class MainWindow(FluentWindow):
         # From main_window
         self.showUpdateMessageBox.connect(self.__onShowUpdateMessageBox)
         self.showNoticeMessageBox.connect(self.__onShowNoticeMessageBox)
+        self.settingInterface.checkNowCard.clicked.connect(self.__startUpdateCheck)
+        self.checkUpdateThread.finished.connect(self.__finishUpdateCheck)
+        self.noNewVersion.connect(lambda: InfoBar.info('检查更新', '当前没有可安装的新版本。',
+                                                       duration=3500, parent=self))
         self.checkUpdateFailed.connect(self.__onCheckUpdateFailed)
         self.fetchNoticeFailed.connect(self.__onFetchNoticeFailed)
         self.stackedWidget.currentChanged.connect(
@@ -335,18 +340,32 @@ class MainWindow(FluentWindow):
             self.showNormal()
             self.activateWindow()
 
+    def __startUpdateCheck(self, manual=True):
+        if self.checkUpdateThread.isRunning() or (not manual and not cfg.get(cfg.enableCheckUpdate)):
+            return
+        self._manualUpdateCheck = manual
+        self.settingInterface.checkNowCard.button.setEnabled(False)
+        self.settingInterface.checkNowCard.button.setText("检查中…")
+        self.checkUpdateThread.start()
+
+    def __finishUpdateCheck(self):
+        self.settingInterface.checkNowCard.button.setEnabled(True)
+        self.settingInterface.checkNowCard.button.setText("立即检查")
+
     def checkUpdate(self):
-        if not cfg.get(cfg.enableCheckUpdate):
+        if not self._manualUpdateCheck and not cfg.get(cfg.enableCheckUpdate):
             return
 
         try:
             releasesInfo = github.checkUpdate()
-        except:
+        except Exception:
             self.checkUpdateFailed.emit()
             return
 
         if releasesInfo:
             self.showUpdateMessageBox.emit(releasesInfo)
+        elif self._manualUpdateCheck:
+            self.noNewVersion.emit()
 
     def checkNotice(self, triggerByUser):
         try:
@@ -471,7 +490,7 @@ class MainWindow(FluentWindow):
 
     def __initListener(self):
         self.processListener.start()
-        self.checkUpdateThread.start()
+        self.__startUpdateCheck(manual=False)
         self.checkNoticeThread.start()
         # self.minimizeThread.start()  # 该功能不再支持 -- By Hpero4
 

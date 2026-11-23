@@ -225,6 +225,8 @@ class SettingInterface(SeraphineInterface):
                 "Automatically check for updates when software starts"),
             cfg.enableCheckUpdate
         )
+        self.checkNowCard = PushSettingCard(
+            '立即检查', Icon.UPDATE, '检查新版本', f'当前版本 {BETA or VERSION}', self.updateGroup)
         self.httpProxyCard = ProxySettingCard(
             self.tr("GitHub HTTP proxy"), self.tr(
                 "Using a proxy when connecting to GitHub"),
@@ -301,6 +303,7 @@ class SettingInterface(SeraphineInterface):
         self.personalizationGroup.addSettingCard(self.languageCard)
 
         self.updateGroup.addSettingCard(self.checkUpdateCard)
+        self.updateGroup.addSettingCard(self.checkNowCard)
         self.updateGroup.addSettingCard(self.httpProxyCard)
 
         self.aboutGroup.addSettingCard(self.feedbackCard)

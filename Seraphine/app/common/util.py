@@ -40,6 +40,8 @@ class Github:
             proxy = None
 
         response = self.sess.get(url, proxies=proxy, timeout=15)
+        if response.status_code in (403, 429):
+            return self._releaseFromWebsite(proxy)
         if response.status_code == 404:
             return None  # A source-only repository has no release yet.
         response.raise_for_status()
@@ -48,6 +50,25 @@ class Github:
         info['assets'] = [asset for asset in info.get('assets', [])
                           if asset.get('name') == 'Seraphine.7z']
         return info if info['assets'] else None
+
+    def _releaseFromWebsite(self, proxy):
+        base = f"https://github.com/{self.user}/{self.repositories}/releases"
+        latest = self.sess.get(base + '/latest', proxies=proxy, timeout=15, allow_redirects=False)
+        latest.raise_for_status()
+        tag = latest.headers.get('Location', '').rsplit('/', 1)[-1]
+        if not re.fullmatch(r'v\d+(\.\d+)*', tag):
+            raise ValueError('无法从 GitHub 确认最新发布版本。')
+        if tag == 'v' + VERSION:
+            return None
+        assets = f'{base}/download/{tag}'
+        sums = self.sess.get(assets + '/SHA256SUMS.txt', proxies=proxy, timeout=20)
+        sums.raise_for_status()
+        match = re.search(r'^([a-fA-F0-9]{64})\s+\*?Seraphine\.7z\s*$', sums.text, re.M)
+        if not match:
+            raise ValueError('GitHub 发布页缺少更新包校验值。')
+        return dict(tag_name=tag, body='更新内容请见 [GitHub 发布页](' + base + '/tag/' + tag + ')。',
+                    assets=[dict(name='Seraphine.7z', digest='sha256:' + match[1].lower(),
+                                 browser_download_url=assets + '/Seraphine.7z')])
 
     def checkUpdate(self):
         """
@@ -78,6 +99,13 @@ class Github:
             proxy = None
 
         response = self.sess.get(url, proxies=proxy, timeout=15)
+        if response.status_code in (403, 429):
+            raw = f'https://raw.githubusercontent.com/{self.user}/{self.repositories}/master/Seraphine/document/ver.json'
+            response = self.sess.get(raw, proxies=proxy, timeout=15)
+            if response.status_code == 404:
+                return {}
+            response.raise_for_status()
+            return response.json().get(VERSION, {})
         if response.status_code == 404:
             return {}
         response.raise_for_status()

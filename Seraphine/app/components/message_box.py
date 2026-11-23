@@ -113,8 +113,11 @@ class UpdateMessageBox(MessageBoxBase):
             archive = work / 'Seraphine.7z'
             asset = self.info['assets'][0]
             digest = hashlib.sha256()
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600)) as session:
-                async with session.get(asset['browser_download_url']) as response:
+            proxy = cfg.get(cfg.githubProxyAddr) if cfg.get(cfg.enableGithubProxy) else None
+            if proxy and '://' not in proxy:
+                proxy = 'http://' + proxy
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600), trust_env=True) as session:
+                async with session.get(asset['browser_download_url'], proxy=proxy) as response:
                     response.raise_for_status()
                     length = int(response.headers.get('Content-Length') or 0)
                     self.bar.setRange(0, length)
