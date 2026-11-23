@@ -21,7 +21,7 @@ from app.lol.opgg import opgg
 from app.lol.champions import ChampionAlias
 from app.lol.rift_analysis import bp_snapshot
 from app.lol.draft_follow import DraftFollow, draft_target
-from app.lol.draft_master import locked_teams, recommend
+from app.lol.draft_master import locked_teams, recommend, identify_jungler
 from app.lol.ranking_cache import RankingCache
 from app.lol.draft_availability import DraftAvailability
 from app.common.logger import logger
@@ -145,6 +145,8 @@ class OpggWindow(OpggWindowBase):
         self.tierComboBox = ComboBox()
         self.positionComboBox = ComboBox()
         self.bpRevision = 0
+        self.draftEpoch = 0
+        self._jungleOptions = None
         self.bpLoading = False
         self.clientLane = None
         self.loadRevision = 0
@@ -179,6 +181,10 @@ class OpggWindow(OpggWindowBase):
         self.waitingInterface = WaitingInterface()
         self.errorInterface = ErrorInterface()
         self.homeInterface = HomeInterface()
+        self.enemyJungle = ComboBox()
+        self.enemyJungle.setAccessibleName('指定敌方打野')
+        self.enemyJungle.setToolTip('对面有摇摆英雄时，可从已锁英雄中指定打野')
+        self.enemyJungle.hide()
         self.masterLabel = BodyLabel()
         self.masterLabel.setWordWrap(True)
         self.masterLabel.setTextFormat(Qt.PlainText)
@@ -236,6 +242,7 @@ class OpggWindow(OpggWindowBase):
         signalBus.gameStatusChanged.connect(self.onGameStatus)
         signalBus.lolClientEnded.connect(self.clearOpponents)
         signalBus.lolClientChanged.connect(self.clearOpponents)
+        self.enemyJungle.currentIndexChanged.connect(self.refreshDraftMaster)
         self.tierInterface.tierList.favoriteChanged.connect(self.refreshDraftMaster)
         for combo in (self.modeComboBox, self.regionComboBox, self.positionComboBox, self.tierComboBox):
             combo.currentIndexChanged.connect(self.refreshDraftMaster)
@@ -247,12 +254,15 @@ class OpggWindow(OpggWindowBase):
         if (not target or target['mode'] != 'ranked' or self.modeComboBox.currentData() != 'ranked'
                 or self._stopping or not session):
             self.masterLabel.hide()
+            self.enemyJungle.hide()
             return
         enemies, allies, assigned, locked = locked_teams(session)
         if locked:
             self.masterLabel.hide()
+            self.enemyJungle.hide()
             return
         lane = assigned or self.positionComboBox.currentData()
+        self.enemyJungle.setVisible(bool(enemies) and lane == 'JUNGLE')
         lane_text = self.positionComboBox.itemText(self.positionComboBox.findData(lane))
         header = f'BP大师 · {lane_text} · 敌方已锁 {len(enemies)} 人'
         if not assigned:
@@ -274,13 +284,31 @@ class OpggWindow(OpggWindowBase):
         if enemies:
             def name(hero):
                 return connector.manager.getChampionNameById(hero) if connector.manager else str(hero)
+            jungle = 0
+            if lane == 'JUNGLE':
+                options = tuple((h, name(h)) for h in sorted(enemies))
+                if options != self._jungleOptions:
+                    previous = self.enemyJungle.currentData() if self._jungleOptions else 0
+                    with QSignalBlocker(self.enemyJungle):
+                        self.enemyJungle.clear()
+                        self.enemyJungle.addItem('敌方打野 · 自动识别', userData=0)
+                        for hero, label in options:
+                            self.enemyJungle.addItem('指定打野 · ' + label, userData=hero)
+                        self.enemyJungle.setCurrentIndex(max(0, self.enemyJungle.findData(previous)))
+                    self._jungleOptions = options
+                jungle, basis = identify_jungler(session, enemies, self.enemyJungle.currentData(), rows)
+                header += f' · {name(jungle)}（{basis}）' if jungle else ' · 对方打野待确认'
             picks = recommend(lane, enemies, allies, tier_list.draftAvailability,
-                              tier_list.preferences, rows, name)
+                              tier_list.preferences, rows, name, jungle)
             header += ' · ' + ('结合分路榜' if rows else '常见英雄参考')
             if tier_list.draftAvailability.pickable is None:
                 header += ' · 可选待确认'
             lines = [f'{i}. {label}　{reason}' for i, (label, reason) in enumerate(picks, 1)]
-            if not lines:
+            if jungle:
+                evidence = next((r.get('counters') for r in rows if r['championId'] == jungle), None)
+                lines.insert(0, '先看打野对位克制榜，再看双方阵容' if evidence and any('打野克制榜' in line for line in lines)
+                             else '暂无可用的打野对位克制候选，先按阵容推荐')
+            if not picks:
                 lines.append('当前候选里暂无合适推荐')
         else:
             lines.append('等待对面锁定英雄')
@@ -359,6 +387,8 @@ class OpggWindow(OpggWindowBase):
         self.loadRevision += 1
         self.clientLane = None
         self.currentDraftFlow = self.currentDraftSession = None
+        self.draftEpoch += 1
+        self._jungleOptions = None
         self.draftFollow.reset()
         self.personalStats.disconnect()
         self.tierInterface.tierList.setAccount('')
@@ -374,6 +404,7 @@ class OpggWindow(OpggWindowBase):
             self._pickableTask = None
         self.tierInterface.tierList.setDraftAvailability(DraftAvailability())
         self.masterLabel.hide()
+        self.enemyJungle.hide()
 
     def updateDraftAvailability(self, session):
         state = DraftAvailability.from_session(session)
@@ -520,6 +551,7 @@ class OpggWindow(OpggWindowBase):
         self.vBoxLayout.setAlignment(Qt.AlignTop)
         self.vBoxLayout.addLayout(self.filterLayout)
         self.vBoxLayout.addWidget(self.statusBar)
+        self.vBoxLayout.addWidget(self.enemyJungle, 0, Qt.AlignLeft)
         self.vBoxLayout.addWidget(self.masterLabel)
         self.vBoxLayout.addWidget(self.stackedWidget,1)
 
@@ -638,6 +670,11 @@ class OpggWindow(OpggWindowBase):
         local = next((p for p in session.get('myTeam') or [] if p.get('cellId')==session.get('localPlayerCellId')), {})
         lane = ALIASES.get((local.get('assignedPosition') or '').lower())
         self.clientLane = lane
+        old_game = (self.currentDraftSession or {}).get('gameId')
+        if old_game and session.get('gameId') and old_game != session['gameId']:
+            self.currentDraftFlow = None
+            self._jungleOptions = None
+            self.draftEpoch += 1
         self.currentDraftSession = session
         self.updateDraftAvailability(session)
         if flow is not None:
@@ -663,6 +700,9 @@ class OpggWindow(OpggWindowBase):
                 and connector.lcuSess is not None):
             self.personalStats.requestRefresh()
         self.bpRevision += 1
+        if phase != self.draftFollow.phase:
+            self.draftEpoch += 1
+            self._jungleOptions = None
         self.draftFollow.on_phase(phase)
         self.__updateFollowStatus()
         if phase == 'ChampSelect':
@@ -679,6 +719,7 @@ class OpggWindow(OpggWindowBase):
             return
         self.bpLoading = True
         revision = self.bpRevision
+        epoch = self.draftEpoch
         follow_revision = self.draftFollow.revision
         try:
             flow = await asyncio.wait_for(connector.getGameflowSession(), 3)
@@ -689,8 +730,15 @@ class OpggWindow(OpggWindowBase):
                     self.clearDraftAvailability()
                 return
             session = await asyncio.wait_for(connector.getChampSelectSession(), 3)
-            if revision == self.bpRevision:
-                self.onChampSelect(session, flow=flow, follow_revision=follow_revision)
+            if epoch != self.draftEpoch:
+                return
+            if revision != self.bpRevision:
+                # Picks/timer updates can arrive during both GETs. Keep the newer
+                # WebSocket session and attach the gameflow of this same draft.
+                session = self.currentDraftSession
+                if not draft_target(flow, session):
+                    return
+            self.onChampSelect(session, flow=flow, follow_revision=follow_revision)
         except (Exception, asyncio.CancelledError):
             pass  # WebSocket updates still provide the next snapshot.
         finally:

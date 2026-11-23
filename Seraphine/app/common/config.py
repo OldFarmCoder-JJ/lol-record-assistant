@@ -242,7 +242,7 @@ class Config(QConfig):
 
 YEAR = 2023
 AUTHOR = "Zzaphkiel"
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 BETA = None
 FEEDBACK_URL = "https://github.com/OldFarmCoder-JJ/lol-record-assistant/issues"
 GITHUB_URL = "https://github.com/OldFarmCoder-JJ/lol-record-assistant"

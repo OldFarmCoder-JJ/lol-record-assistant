@@ -818,6 +818,13 @@ class MainWindow(FluentWindow):
         elif status == 'ChampSelect':
             title = self.tr("Selecting Champions")
 
+            # Open immediately on each draft, even if the client is still preparing team data.
+            if cfg.get(cfg.autoShowOpgg):
+                self.opggWindow.show()
+                self.opggWindow.raise_()
+                if cfg.get(cfg.enableOpggOnTop):
+                    self.opggWindow.setStaysOnTopEnabled(True)
+
             # 在标题添加所处队伍
             side = await connector.getMapSide()
             if side:
@@ -914,11 +921,6 @@ class MainWindow(FluentWindow):
 
         self.championSelection.queueId = queueId
 
-        if cfg.get(cfg.autoShowOpgg):
-            self.opggWindow.show()
-
-            if cfg.get(cfg.enableOpggOnTop):
-                self.opggWindow.setStaysOnTopEnabled(True)
 
         currentSummonerId = self.currentSummoner['summonerId']
         info = await parseAllyGameInfo(cSession, currentSummonerId, queueId, useSGP=True)

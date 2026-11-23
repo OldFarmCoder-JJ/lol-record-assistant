@@ -209,6 +209,23 @@ async def verify():
     resume()
     await until(lambda: shown(1))
 
+    # Timer/hover traffic during the next game's GET used to discard the
+    # entire flow and leave the BP panel hidden despite a fresh session.
+    window.onGameStatus('Lobby')
+    connector.lcuSess = None
+    window.onGameStatus('ChampSelect')
+    await asyncio.sleep(.02)
+    gate = asyncio.Future()
+    connector.lcuSess = object()
+    task = asyncio.create_task(window._OpggWindow__loadCurrentBP.__wrapped__(window))
+    await until(lambda: window.bpLoading)
+    latest = draft(41, 'jungle')
+    window.onChampSelect(latest)
+    gate.set_result(flow(41))
+    await task
+    assert window.currentDraftSession is latest and not window.masterLabel.isHidden()
+    assert window.clientLane == 'JUNGLE'
+
     # Disconnect invalidates a pending client read and clears personal and follow state.
     gate = asyncio.Future()
     task = asyncio.create_task(window._OpggWindow__loadCurrentBP.__wrapped__(window))

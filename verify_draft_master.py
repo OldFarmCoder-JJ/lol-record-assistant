@@ -67,6 +67,26 @@ update([14])
 assert not window.masterLabel.isHidden()
 window.onChampSelect({'eventType': 'Delete'})
 assert window.masterLabel.isHidden()
+# A second draft, same window. An enemy jungler can be inferred, corrected,
+# or confirmed by the client's assigned role. Direct counters beat comp score.
+session['gameId'] = flow['gameData']['gameId'] = 2
+local['assignedPosition'] = 'jungle'
+window._displayedTierPayload = {'data': {'JUNGLE': [
+    dict(championId=11, name='剑圣', rank=1, counters=[dict(championId=254)]),
+    dict(championId=254, name='蔚', rank=20),
+    dict(championId=33, name='龙龟', rank=2)]}}
+text = update([11, 23, 222])
+assert not window.masterLabel.isHidden() and '分路推测' in text and '1. 蔚' in text and '打野克制榜可打剑圣' in text, text
+text = update([11, 33, 23])
+assert '打野待确认' in text
+window.enemyJungle.setCurrentIndex(window.enemyJungle.findData(11))
+assert '手动指定' in window.masterLabel.text() and '1. 蔚' in window.masterLabel.text()
+window.enemyJungle.setCurrentIndex(0)
+session['theirTeam'][0]['spell1Id'] = 11
+window.refreshDraftMaster()
+assert '客户端分路或惩戒' in window.masterLabel.text()
+window.onGameStatus('Lobby')
+assert window.enemyJungle.isHidden()
 flow['gameData']['queue']['id'] = 2400
 update([14])
 assert window.masterLabel.isHidden()

@@ -34,7 +34,7 @@ RULES = (
 def locked_teams(session):
     """Use completed actions to confirm slots, current portraits to follow trades."""
     locks = {a.get('actorCellId'): a.get('championId') for group in session.get('actions') or []
-             for a in group if a.get('type') == 'pick' and a.get('completed') is True}
+             for a in group if a.get('type') == 'pick' and a.get('completed') is True and (a.get('championId') or 0) > 0}
     local = session.get('localPlayerCellId')
     def team(side):
         return {p.get('championId') or locks[p['cellId']] for p in session.get(side) or []
@@ -44,13 +44,37 @@ def locked_teams(session):
     return team('theirTeam'), team('myTeam'), lane, local in locks
 
 
-def recommend(lane, enemies, allies, availability, preferences, rows, name):
+def identify_jungler(session, enemies, manual, rows):
+    if manual in enemies:
+        return manual, '手动指定'
+    possible = set(enemies)
+    confirmed = set()
+    for player in session.get('theirTeam') or []:
+        hero = player.get('championId')
+        if hero not in enemies:
+            continue
+        lane = LANES.get(str(player.get('assignedPosition') or '').lower())
+        if lane == 'JUNGLE' or 11 in (player.get('spell1Id'), player.get('spell2Id')):
+            confirmed.add(hero)
+        elif lane:
+            possible.discard(hero)
+    if len(confirmed) == 1:
+        return confirmed.pop(), '客户端分路或惩戒'
+    common = {r['championId'] for r in rows} or set(LANE_PICKS['JUNGLE'])
+    likely = possible & common
+    if not confirmed and len(likely) == 1:
+        return likely.pop(), '分路推测，可改'
+    return 0, ''
+
+
+def recommend(lane, enemies, allies, availability, preferences, rows, name, jungle=0):
     by_id = {r['championId']: r for r in rows}
     candidates = by_id or LANE_PICKS.get(lane, ())
     counters = {}
     for enemy in sorted(enemies & by_id.keys()):
         for entry in by_id[enemy].get('counters') or ():
             counters.setdefault(entry['championId'], []).append(by_id[enemy]['name'])
+    direct = {c['championId'] for c in by_id.get(jungle, {}).get('counters', ()) or ()}
     scored = []
     for index, hero in enumerate(candidates):
         if hero in enemies or hero in allies or availability.status(hero) in ('picked', 'banned', 'unavailable'):
@@ -62,7 +86,7 @@ def recommend(lane, enemies, allies, availability, preferences, rows, name):
             if hero in answers and count:
                 reasons.append((count, reason.format(count)))
                 score += count
-        if hero in counters:
+        if not jungle and hero in counters:
             reasons.append((2, '若同路可打' + '、'.join(counters[hero])))
             score += 2
         if allies & CARRY and hero in PEEL:
@@ -78,11 +102,13 @@ def recommend(lane, enemies, allies, availability, preferences, rows, name):
             continue
         reasons.sort(key=lambda pair: -pair[0])
         details = [s for _, s in reasons[:2]]
+        if hero in direct:
+            details.insert(0, '打野克制榜可打' + by_id[jungle]['name'])
         if not details and row:
             details.append(f"当前分路排行第{row['rank']}")
         if favorite or recent:
             details.append('已收藏' if favorite else '近期排位玩过')
         # Prefer familiar picks at similar fit, while preserving strong draft evidence.
-        key = (-(score + int(favorite or recent)), -score, row.get('rank') or index + 1, hero)
+        key = (hero not in direct, -(score + int(favorite or recent)), -score, row.get('rank') or index + 1, hero)
         scored.append((key, row.get('name') or name(hero), '，'.join(details)))
     return [(label, reason) for _, label, reason in sorted(scored)[:3]]
