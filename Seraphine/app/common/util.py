@@ -23,9 +23,7 @@ TAG = "Util"
 class Github:
     def __init__(self, user="OldFarmCoder-JJ", repositories="lol-record-assistant"):
         self.githubApi = "https://api.github.com"
-        self.giteeApi = "http://gitee.com/api"
-
-        self.proxyApi = 'https://ghproxy.net'
+        self.giteeRepo = 'jiagyuanxun/lol-record-assistant'
 
         self.user = user
         self.repositories = repositories
@@ -75,6 +73,10 @@ class Github:
         检查版本更新
         @return: 有更新 -> info, 无更新 -> None
         """
+        try:
+            return self._giteeUpdate()
+        except (requests.RequestException, ValueError, KeyError, TypeError, AttributeError) as error:
+            logger.warning(f'Gitee 更新源不可用，正在使用 GitHub：{error}')
         info = self.getReleasesInfo()
         if info is None:
             return None
@@ -90,6 +92,36 @@ class Github:
         info["forbidden"] = ver_info.get("forbidden", False)
 
         return info
+
+    def _giteeUpdate(self):
+        api = f'https://gitee.com/api/v5/repos/{self.giteeRepo}'
+        release = self.sess.get(api + '/releases/latest', timeout=8)
+        release.raise_for_status()
+        info = release.json()
+        tag = info['tag_name']
+        if not re.fullmatch(r'v\d+(?:\.\d+)*', tag) or info.get('prerelease') or info.get('draft'):
+            raise ValueError('Gitee 缺少正式版本。')
+        if tuple(map(int, tag[1:].split('.'))) <= tuple(map(int, VERSION.split('.'))):
+            return None
+        names = {asset.get('name') for asset in info['assets']}
+        if not {'SHA256SUMS.txt', 'Seraphine.7z'} <= names:
+            raise ValueError('Gitee 更新包尚未发布完整。')
+        base = f'https://gitee.com/{self.giteeRepo}/releases/download/{tag}'
+        sums = self.sess.get(base + '/SHA256SUMS.txt', timeout=8)
+        sums.raise_for_status()
+        match = re.search(r'^([a-fA-F0-9]{64})\s+\*?Seraphine\.7z\s*$', sums.text, re.M)
+        if not match:
+            raise ValueError('Gitee 发布页缺少更新包校验值。')
+        asset = dict(name='Seraphine.7z', browser_download_url=base + '/Seraphine.7z',
+                     digest='sha256:' + match[1].lower(),
+                     fallback_url=f'https://github.com/{self.user}/{self.repositories}/releases/download/{tag}/Seraphine.7z')
+        metadata = self.sess.get(f'{api}/contents/Seraphine/document/ver.json', params={'ref': tag}, timeout=8)
+        forbidden = False
+        if metadata.status_code != 404:
+            metadata.raise_for_status()
+            versions = json.loads(base64.b64decode(metadata.json()['content']))
+            forbidden = versions.get(VERSION, {}).get('forbidden', False)
+        return dict(tag_name=tag, body=info.get('body') or '', assets=[asset], forbidden=forbidden)
 
     def __getVersionInfo(self):
         url = f'{self.githubApi}/repos/{self.user}/{self.repositories}/contents/Seraphine/document/ver.json'

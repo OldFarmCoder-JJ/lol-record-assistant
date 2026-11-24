@@ -12,6 +12,8 @@
 
 ## 下载与使用
 
+国内用户可以在 [Gitee 发行版](https://gitee.com/jiagyuanxun/lol-record-assistant/releases) 下载 `Seraphine.zip`。从 v1.7.1 起，助手优先通过 Gitee 检查和下载更新，连接失败时会尝试 GitHub。已安装 v1.7.0 或更早修改版的用户可手动从 Gitee 下载一次，或照常从 GitHub 升级。
+
 1. 下载 **[Seraphine.zip](https://github.com/OldFarmCoder-JJ/lol-record-assistant/releases/latest/download/Seraphine.zip)**，完整解压到一个文件夹。
 2. 打开英雄联盟客户端，再运行文件夹中的 **`Seraphine.exe`**。
 3. 打开「英雄排行与攻略」，选择峡谷或海克斯大乱斗；点击「战绩统计」查看本人的近期记录。

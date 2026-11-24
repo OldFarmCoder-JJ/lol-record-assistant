@@ -1,5 +1,7 @@
 # GitHub 分发与后续更新
 
+自 v1.7.1 起，正式版同时发布到 [Gitee](https://gitee.com/jiagyuanxun/lol-record-assistant/releases) 和 GitHub。每次发布使用相同的源码标签，并将同一次构建生成的 `Seraphine.7z`、`Seraphine.zip`、`SHA256SUMS.txt` 上传到两边的正式发行版。同步 Git 代码不会同步附件。先发 GitHub，再发 Gitee，以便旧版升级和同版本下载回退。新版通过 Gitee 的 latest 接口读版本，并在下载后校验 7z 的 SHA-256。
+
 目标仓库：https://github.com/OldFarmCoder-JJ/lol-record-assistant 。当前版本先发布源码，日常开发不自动打包。
 
 向其他人提供 Windows 程序时，正式构建完整的 Seraphine.7z 并上传本仓库 Releases。随后旧版助手可以检查这个仓库的版本信息。只修改源码或推送 Git 提交，不会使别人已下载的 EXE 自动变化。

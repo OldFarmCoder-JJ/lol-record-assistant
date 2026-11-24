@@ -6,6 +6,7 @@ from pathlib import Path
 import sys
 import tempfile
 from unittest.mock import Mock
+import requests
 
 ROOT = Path(__file__).resolve().parent
 os.environ['APPDATA'] = tempfile.mkdtemp(prefix='Seraphine-github-test-')
@@ -24,6 +25,19 @@ client = Github()
 assert client.user == 'OldFarmCoder-JJ' and client.repositories == 'lol-record-assistant'
 assert client.githubApi.startswith('https://')
 client.sess = Mock()
+release = {'tag_name': 'v9.0.0', 'assets': [{'name': 'Seraphine.7z'}, {'name': 'SHA256SUMS.txt'}]}
+sums = response()
+sums.text = 'a' * 64 + '  Seraphine.7z\n'
+client.sess.get.side_effect = [response(data=release), sums, response(404)]
+asset = client.checkUpdate()['assets'][0]
+assert asset['browser_download_url'].startswith('https://gitee.com/jiagyuanxun/lol-record-assistant/')
+assert asset['digest'] == 'sha256:' + 'a' * 64 and 'github.com' in asset['fallback_url']
+client.sess.get.side_effect = [response(data=dict(release, tag_name='v' + VERSION))]
+assert client.checkUpdate() is None
+client.sess.get.side_effect = [response(data=dict(release, assets=[])), response(404)]
+assert client.checkUpdate() is None and 'api.github.com' in client.sess.get.call_args.args[0]
+client._giteeUpdate = Mock(side_effect=requests.ConnectionError('offline'))
+client.sess.get.side_effect = None
 client.sess.get.return_value = response(404)
 assert client.checkUpdate() is None
 client.sess.get.return_value = response(data={'tag_name': 'v9.0.0', 'assets': []})

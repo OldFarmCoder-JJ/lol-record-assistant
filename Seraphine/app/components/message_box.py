@@ -99,6 +99,25 @@ class UpdateMessageBox(MessageBoxBase):
         self.viewLayout.addWidget(self.infoLabel, alignment=Qt.AlignRight)
         self.viewLayout.addWidget(self.bar)
 
+    async def _downloadArchive(self, session, url, proxy, archive, expected):
+        digest = hashlib.sha256()
+        async with session.get(url, proxy=proxy) as response:
+            response.raise_for_status()
+            length = int(response.headers.get('Content-Length') or 0)
+            self.bar.setRange(0, length)
+            current = 0
+            with archive.open('wb') as file:
+                async for chunk in response.content.iter_chunked(1024 * 1024):
+                    file.write(chunk)
+                    digest.update(chunk)
+                    current += len(chunk)
+                    self.bar.setValue(current)
+                    self.infoLabel.setText(f'{current / (1024 * 1024):.2f} MB')
+            if length and current != length:
+                raise ValueError('下载文件不完整，请重试。')
+        if expected.startswith('sha256:') and digest.hexdigest() != expected[7:]:
+            raise ValueError('发布包校验失败，请重试。')
+
     @asyncSlot()
     async def __onYesButtonClicked(self):
         self.myYesButton.setEnabled(False)
@@ -112,28 +131,21 @@ class UpdateMessageBox(MessageBoxBase):
             work = Path(tempfile.mkdtemp(prefix='pending-', dir=parent))
             archive = work / 'Seraphine.7z'
             asset = self.info['assets'][0]
-            digest = hashlib.sha256()
             proxy = cfg.get(cfg.githubProxyAddr) if cfg.get(cfg.enableGithubProxy) else None
             if proxy and '://' not in proxy:
                 proxy = 'http://' + proxy
-            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=600), trust_env=True) as session:
-                async with session.get(asset['browser_download_url'], proxy=proxy) as response:
-                    response.raise_for_status()
-                    length = int(response.headers.get('Content-Length') or 0)
-                    self.bar.setRange(0, length)
-                    current = 0
-                    with archive.open('wb') as file:
-                        async for chunk in response.content.iter_chunked(1024 * 1024):
-                            file.write(chunk)
-                            digest.update(chunk)
-                            current += len(chunk)
-                            self.bar.setValue(current)
-                            self.infoLabel.setText(f'{current / (1024 * 1024):.2f} MB')
-                    if length and current != length:
-                        raise ValueError('下载文件不完整，请重试。')
+            fallback = asset.get('fallback_url')
             expected = asset.get('digest') or ''
-            if expected.startswith('sha256:') and digest.hexdigest() != expected[7:]:
-                raise ValueError('发布包校验失败，请重试。')
+            timeout = aiohttp.ClientTimeout(total=600, sock_connect=12, sock_read=30)
+            async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
+                try:
+                    await self._downloadArchive(session, asset['browser_download_url'],
+                                                None if fallback else proxy, archive, expected)
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                    if not fallback:
+                        raise
+                    self.infoLabel.setText('Gitee 下载失败，正在切换至 GitHub…')
+                    await self._downloadArchive(session, fallback, proxy, archive, expected)
             self.infoLabel.setText('正在校验并准备更新…')
             payload = work / 'payload'
             await asyncio.get_running_loop().run_in_executor(None, prepareUpdate, archive, payload)
