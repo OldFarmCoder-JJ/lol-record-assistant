@@ -497,6 +497,7 @@ class MainWindow(FluentWindow):
     async def __changeCareerToCurrentSummoner(self):
         summoner = await connector.getCurrentSummoner()
         self.currentSummoner = summoner
+        self.opggWindow.onAccount(summoner)
         name = summoner.get("gameName") or summoner['displayName']
         self.careerInterface.setLoginSummonerPuuid(summoner['puuid'])
 

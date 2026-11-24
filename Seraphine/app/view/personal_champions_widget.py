@@ -119,6 +119,8 @@ class PersonalChampionsWidget(QWidget):
         header.addWidget(SubtitleLabel('战绩统计'))
         header.addStretch()
         self.refreshButton = PushButton('刷新战绩')
+        self.reviewButton = PushButton('BP 推荐复盘')
+        header.addWidget(self.reviewButton)
         header.addWidget(self.refreshButton)
         layout.addLayout(header)
 

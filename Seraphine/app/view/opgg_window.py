@@ -20,12 +20,15 @@ from app.lol.connector import connector, gameIconCachePath
 from app.lol.opgg import opgg
 from app.lol.champions import ChampionAlias
 from app.lol.rift_analysis import bp_snapshot
+from app.lol.draft_review import DraftReview
+from app.lol.personal_history import normalize_game
+from app.view.draft_review_dialog import DraftReviewDialog
 from app.lol.draft_follow import DraftFollow, draft_target
 from app.lol.draft_master import locked_teams, recommend, identify_opponent, own_locked_pick
 from app.lol.ranking_cache import RankingCache
 from app.lol.draft_availability import DraftAvailability
 from app.common.logger import logger
-from app.common.config import qconfig, cfg, LOCAL_PATH
+from app.common.config import qconfig, cfg, LOCAL_PATH, VERSION
 from app.common.style_sheet import StyleSheet
 from app.common.signals import signalBus
 from app.common.util import getLolClientWindowPos
@@ -164,6 +167,12 @@ class OpggWindow(OpggWindowBase):
         self.personalStats = PersonalChampionsWidget(
             lambda id: connector.manager.getChampionNameById(id) if connector.manager else str(id),
             opgg.getBPChampionIcon)
+        self.review = DraftReview(Path(LOCAL_PATH) / 'bp-review')
+        self.reviewTask = None
+        self.reviewDialog = DraftReviewDialog(self)
+        self.personalStats.reviewButton.clicked.connect(self.openDraftReview)
+        self.reviewDialog.marked.connect(self.markDraftReview)
+        self.reviewDialog.refresh.clicked.connect(self.syncDraftResults)
         self.personalButton = PushButton('战绩统计')
         self.personalButton.clicked.connect(self.__togglePersonalStats)
         self.personalContext = CaptionLabel('本人战绩 · 仅已读取范围')
@@ -245,7 +254,7 @@ class OpggWindow(OpggWindowBase):
             hero, 'aram_mayhem' if self.personalStats.queueCombo.currentData() == 'mayhem' else 'ranked',
             'none' if self.personalStats.queueCombo.currentData() == 'mayhem' else lane))
         self.personalStats.historyChanged.connect(self.__onPersonalHistory)
-        signalBus.currentSummonerProfileChanged.connect(self.__onAccount)
+        signalBus.currentSummonerProfileChanged.connect(self.onAccount)
 
         # self.debugButton.click()
         self.debugButton.setVisible(False)
@@ -283,6 +292,7 @@ class OpggWindow(OpggWindowBase):
         self.ownGuide.setVisible(locked)
         if locked:
             hero = own_locked_pick(session)
+            self.recordDraft(target, assigned or self.positionComboBox.currentData(), [], hero)
             name = connector.manager.getChampionNameById(hero) if connector.manager else str(hero)
             self.ownGuide.setText(f'我选 · {name}   查看符文和出装')
             self.masterList.hide()
@@ -354,6 +364,67 @@ class OpggWindow(OpggWindowBase):
         self.showMasterPicks(picks)
         self.masterLabel.setText(' · '.join([header, *lines]))
         self.masterLabel.show()
+        if self.masterLabel.isVisible() and not self.isMinimized():
+            self.recordDraft(target, lane, [[p.hero, p.name] for p in picks])
+
+    def recordDraft(self, target, lane, picks, locked=0):
+        owner = self.personalStats.puuid
+        if not owner or not target.get('gameId'):
+            return
+        session = self.currentDraftSession or {}
+        local = next((p for p in session.get('myTeam', [])
+                      if p.get('cellId') == session.get('localPlayerCellId')), {})
+        if local.get('puuid') and local['puuid'] != owner:
+            return
+        self.review.observe(target['gameId'], target['queueId'], lane, VERSION, picks, locked)
+
+    def renderDraftReview(self):
+        self.reviewDialog.render(self.review.rows(), self.personalStats.name_lookup)
+
+    def markDraftReview(self, game, followed):
+        self.review.mark(game, followed)
+        self.renderDraftReview()
+
+    def openDraftReview(self):
+        self.renderDraftReview()
+        self.reviewDialog.show()
+        self.reviewDialog.raise_()
+        self.syncDraftResults()
+
+    def syncDraftResults(self, *args, after_game=False):
+        if (not self.personalStats.puuid or connector.lcuSess is None or self._stopping
+                or (self.reviewTask and not self.reviewTask.done()) or not self.review.pending()):
+            return
+        self.reviewTask = asyncio.create_task(self.readDraftResults(self.personalStats.puuid, after_game))
+
+    async def readDraftResults(self, owner, after_game):
+        self.reviewDialog.refresh.setEnabled(False)
+        try:
+            for delay in ((0, 5, 15) if after_game else (0,)):
+                await asyncio.sleep(delay)
+                if owner != self.personalStats.puuid or self._stopping:
+                    return
+                pending = self.review.pending()
+                if not pending:
+                    return
+                for game in pending:
+                    if owner != self.personalStats.puuid:
+                        return
+                    try:
+                        raw = await asyncio.wait_for(connector.getGameDetailByGameId(game), 4)
+                        row = normalize_game(raw, owner)
+                    except Exception:
+                        continue  # Some clients publish the game only after the results screen.
+                    if owner != self.personalStats.puuid:
+                        return
+                    if row and str(row['gameId']) == str(game):
+                        self.review.reconcile([row])
+                if self.reviewDialog.isVisible():
+                    self.renderDraftReview()
+                if not self.review.pending():
+                    return
+        finally:
+            self.reviewDialog.refresh.setEnabled(True)
 
     async def loadDuel(self, key):
         try:
@@ -401,10 +472,14 @@ class OpggWindow(OpggWindowBase):
         finally:
             self._iconTasks.pop(hero, None)
 
-    def __onAccount(self, profile):
+    def onAccount(self, profile):
         previous = self.personalStats.puuid
+        if previous and isinstance(profile, dict) and profile.get('puuid') not in (None, '', previous):
+            self.clearOpponents()
         self.tierInterface.tierList.setAccount(profile)
         self.personalStats.setAccount(profile)
+        if previous != self.personalStats.puuid:
+            self.syncDraftResults()
         self.refreshDraftMaster()
         if (self.personalStats.puuid and self.personalStats.puuid != previous
                 and connector.lcuSess is not None
@@ -412,6 +487,10 @@ class OpggWindow(OpggWindowBase):
             self.personalStats.requestRefresh()
 
     def __onPersonalHistory(self, records):
+        self.review.set_account(self.personalStats.puuid)
+        self.review.reconcile(records)
+        if self.reviewDialog.isVisible():
+            self.renderDraftReview()
         self.tierInterface.tierList.setAccount(self.personalStats.puuid)
         self.tierInterface.tierList.setRecent(records)
         self.refreshDraftMaster()
@@ -476,6 +555,9 @@ class OpggWindow(OpggWindowBase):
         self.draftEpoch += 1
         self._jungleOptions = self._duelKey = None
         self.draftFollow.reset()
+        if self.reviewTask:
+            self.reviewTask.cancel()
+            self.reviewTask = None
         self.personalStats.disconnect()
         self.tierInterface.tierList.setAccount('')
         self.__updateFollowStatus()
@@ -786,6 +868,8 @@ class OpggWindow(OpggWindowBase):
         await self.showRanking()
 
     def onGameStatus(self, phase):
+        if phase == 'EndOfGame':
+            self.syncDraftResults(after_game=True)
         if (phase == 'EndOfGame' and self.stackedWidget.currentWidget() is self.personalStats
                 and connector.lcuSess is not None):
             self.personalStats.requestRefresh()
@@ -953,6 +1037,8 @@ class OpggWindow(OpggWindowBase):
 
     def stop(self):
         self._stopping = True
+        if self.reviewTask:
+            self.reviewTask.cancel()
         if self._duelTask:
             self._duelTask.cancel()
         for task in tuple(self._iconTasks.values()):
