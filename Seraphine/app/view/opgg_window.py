@@ -12,16 +12,16 @@ from PyQt5.QtGui import QColor, QPainter, QIcon, QShowEvent
 from PyQt5.QtCore import Qt, pyqtSignal, QSize, QRect, QEvent, QSignalBlocker
 from PyQt5.QtWidgets import (QHBoxLayout, QStackedWidget, QWidget, QLabel,
                              QFrame, QVBoxLayout, QSpacerItem, QSizePolicy,
-                             QApplication)
+                             QApplication, QListWidget, QListWidgetItem)
 
 
 from app.common.icons import Icon
-from app.lol.connector import connector
+from app.lol.connector import connector, gameIconCachePath
 from app.lol.opgg import opgg
 from app.lol.champions import ChampionAlias
 from app.lol.rift_analysis import bp_snapshot
 from app.lol.draft_follow import DraftFollow, draft_target
-from app.lol.draft_master import locked_teams, recommend, identify_jungler
+from app.lol.draft_master import locked_teams, recommend, identify_opponent
 from app.lol.ranking_cache import RankingCache
 from app.lol.draft_availability import DraftAvailability
 from app.common.logger import logger
@@ -182,9 +182,21 @@ class OpggWindow(OpggWindowBase):
         self.errorInterface = ErrorInterface()
         self.homeInterface = HomeInterface()
         self.enemyJungle = ComboBox()
-        self.enemyJungle.setAccessibleName('指定敌方打野')
-        self.enemyJungle.setToolTip('对面有摇摆英雄时，可从已锁英雄中指定打野')
+        self.enemyJungle.setAccessibleName('指定敌方对位英雄')
+        self.enemyJungle.setToolTip('对面有摇摆英雄时，可从已锁英雄中指定对位')
         self.enemyJungle.hide()
+        self.masterList = QListWidget()
+        self.masterList.setAccessibleName('BP大师英雄推荐')
+        self.masterList.setIconSize(QSize(36, 36))
+        self.masterList.setWordWrap(True)
+        self.masterList.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.masterList.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.masterList.hide()
+        self._shownPicks = ()
+        self._duelKey = self._duelTask = None
+        self._duelRows = {}
+        self._duelSource = ''
+        self._iconTasks = {}
         self.masterLabel = BodyLabel()
         self.masterLabel.setWordWrap(True)
         self.masterLabel.setTextFormat(Qt.PlainText)
@@ -253,16 +265,18 @@ class OpggWindow(OpggWindowBase):
         target = draft_target(self.currentDraftFlow, session)
         if (not target or target['mode'] != 'ranked' or self.modeComboBox.currentData() != 'ranked'
                 or self._stopping or not session):
+            self.masterList.hide()
             self.masterLabel.hide()
             self.enemyJungle.hide()
             return
         enemies, allies, assigned, locked = locked_teams(session)
         if locked:
+            self.masterList.hide()
             self.masterLabel.hide()
             self.enemyJungle.hide()
             return
         lane = assigned or self.positionComboBox.currentData()
-        self.enemyJungle.setVisible(bool(enemies) and lane == 'JUNGLE')
+        self.enemyJungle.setVisible(bool(enemies))
         lane_text = self.positionComboBox.itemText(self.positionComboBox.findData(lane))
         header = f'BP大师 · {lane_text} · 敌方已锁 {len(enemies)} 人'
         if not assigned:
@@ -275,45 +289,103 @@ class OpggWindow(OpggWindowBase):
                 if payload.get('position') == lane:
                     rows = payload.get('legacyRows') or [
                         dict(championId=r['championId'], name=r['name'],
-                             rank=i, counters=[{'championId': h} for h in
+                             rank=i, winRate=r['evidence'].get('cn', {}).get('winRate'),
+                             icon=r.get('icon'), counters=[{'championId': h} for h in
                                  r['evidence'].get('cn', {}).get('counterIds', [])])
                         for i, r in enumerate(payload['data'], 1)]
             elif isinstance(payload.get('data'), dict):
                 rows = payload['data'].get(lane, [])
         lines = []
+        picks = []
         if enemies:
             def name(hero):
                 return connector.manager.getChampionNameById(hero) if connector.manager else str(hero)
-            jungle = 0
-            if lane == 'JUNGLE':
-                options = tuple((h, name(h)) for h in sorted(enemies))
-                if options != self._jungleOptions:
-                    previous = self.enemyJungle.currentData() if self._jungleOptions else 0
-                    with QSignalBlocker(self.enemyJungle):
-                        self.enemyJungle.clear()
-                        self.enemyJungle.addItem('敌方打野 · 自动识别', userData=0)
-                        for hero, label in options:
-                            self.enemyJungle.addItem('指定打野 · ' + label, userData=hero)
-                        self.enemyJungle.setCurrentIndex(max(0, self.enemyJungle.findData(previous)))
-                    self._jungleOptions = options
-                jungle, basis = identify_jungler(session, enemies, self.enemyJungle.currentData(), rows)
-                header += f' · {name(jungle)}（{basis}）' if jungle else ' · 对方打野待确认'
+            options = (lane, tuple((h, name(h)) for h in sorted(enemies)))
+            role = '打野' if lane == 'JUNGLE' else '对位'
+            if options != self._jungleOptions:
+                previous = self.enemyJungle.currentData() if self._jungleOptions and self._jungleOptions[0] == lane else 0
+                with QSignalBlocker(self.enemyJungle):
+                    self.enemyJungle.clear()
+                    self.enemyJungle.addItem('敌方' + role + ' · 自动识别', userData=0)
+                    for hero, label in options[1]:
+                        self.enemyJungle.addItem('指定' + role + ' · ' + label, userData=hero)
+                    self.enemyJungle.setCurrentIndex(max(0, self.enemyJungle.findData(previous)))
+                self._jungleOptions = options
+            opponent, basis = identify_opponent(session, enemies, self.enemyJungle.currentData(), rows, lane)
+            header += f' · {name(opponent)}（{basis}）' if opponent else f' · 对方{role}待确认'
+            key = (self.regionComboBox.currentData(), self.tierComboBox.currentData(), lane,
+                   opponent, payload.get('version')) if opponent and rows and payload.get('version') else None
+            if key != self._duelKey:
+                if self._duelTask:
+                    self._duelTask.cancel()
+                self._duelKey, self._duelRows, self._duelSource = key, {}, ''
+                if key and opgg.session and not opgg.session.closed:
+                    self._duelSource = '查询对位中'
+                    self._duelTask = asyncio.create_task(self.loadDuel(key))
             picks = recommend(lane, enemies, allies, tier_list.draftAvailability,
-                              tier_list.preferences, rows, name, jungle)
-            header += ' · ' + ('结合分路榜' if rows else '常见英雄参考')
+                              tier_list.preferences, rows, name, opponent, self._duelRows if key else {})
+            header += f' · {len(picks)} 个候选'
+            if rows:
+                source_name = {'global':'全球', 'kr':'韩服', 'cn':'国服', 'consensus':'国服'}.get(
+                    self.regionComboBox.currentData(), '')
+                header += f' · 结合分路榜（{source_name}）'
+            if key and self._duelSource:
+                lines.append(self._duelSource)
             if tier_list.draftAvailability.pickable is None:
-                header += ' · 可选待确认'
-            lines = [f'{i}. {label}　{reason}' for i, (label, reason) in enumerate(picks, 1)]
-            if jungle:
-                evidence = next((r.get('counters') for r in rows if r['championId'] == jungle), None)
-                lines.insert(0, '先看打野对位克制榜，再看双方阵容' if evidence and any('打野克制榜' in line for line in lines)
-                             else '暂无可用的打野对位克制候选，先按阵容推荐')
+                lines.append('可选待确认')
             if not picks:
                 lines.append('当前候选里暂无合适推荐')
         else:
             lines.append('等待对面锁定英雄')
-        self.masterLabel.setText('\n'.join([header, *lines]))
+        self.showMasterPicks(picks)
+        self.masterLabel.setText(' · '.join([header, *lines]))
         self.masterLabel.show()
+
+    async def loadDuel(self, key):
+        try:
+            rows, source = await asyncio.wait_for(opgg.draftLaneMatchups(*key), 12)
+            status = source + '同路对局' if rows else '无对位样本'
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            rows, status = {}, '对位统计暂缺'
+        if self._duelKey == key and not self._stopping:
+            self._duelRows, self._duelSource = rows, status
+            self.refreshDraftMaster()
+
+    def showMasterPicks(self, picks):
+        self.masterList.setVisible(bool(picks))
+        if tuple(picks) == self._shownPicks:
+            return
+        self._shownPicks = tuple(picks)
+        scroll = self.masterList.verticalScrollBar().value()
+        self.masterList.clear()
+        for index, pick in enumerate(picks, 1):
+            path = Path(pick.icon) if pick.icon else Path(gameIconCachePath('champion', pick.hero))
+            if not path.is_file():
+                path = Path(gameIconCachePath('champion', pick.hero))
+            item = QListWidgetItem(f'{index}. {pick.name}　{pick.stats}\n{pick.reason}')
+            item.setData(Qt.UserRole, pick.hero)
+            item.setToolTip(item.text())
+            item.setIcon(QIcon(str(path) if path.is_file() else 'app/resource/images/champion-0.png'))
+            self.masterList.addItem(item)
+            if not path.is_file() and pick.hero not in self._iconTasks and connector.lcuSess and opgg.assetSession:
+                self._iconTasks[pick.hero] = asyncio.create_task(self.loadMasterIcon(pick.hero))
+        self.masterList.setFixedHeight(min(180, 8 + sum(self.masterList.sizeHintForRow(i)
+                                                        for i in range(min(4, len(picks))))))
+        self.masterList.verticalScrollBar().setValue(scroll)
+
+    async def loadMasterIcon(self, hero):
+        try:
+            icon = QIcon(await opgg.getBPChampionIcon(hero))
+            for i in range(self.masterList.count()):
+                item = self.masterList.item(i)
+                if item.data(Qt.UserRole) == hero:
+                    item.setIcon(icon)
+        except Exception:
+            pass
+        finally:
+            self._iconTasks.pop(hero, None)
 
     def __onAccount(self, profile):
         previous = self.personalStats.puuid
@@ -388,7 +460,7 @@ class OpggWindow(OpggWindowBase):
         self.clientLane = None
         self.currentDraftFlow = self.currentDraftSession = None
         self.draftEpoch += 1
-        self._jungleOptions = None
+        self._jungleOptions = self._duelKey = None
         self.draftFollow.reset()
         self.personalStats.disconnect()
         self.tierInterface.tierList.setAccount('')
@@ -404,6 +476,7 @@ class OpggWindow(OpggWindowBase):
             self._pickableTask = None
         self.tierInterface.tierList.setDraftAvailability(DraftAvailability())
         self.masterLabel.hide()
+        self.masterList.hide()
         self.enemyJungle.hide()
 
     def updateDraftAvailability(self, session):
@@ -553,6 +626,7 @@ class OpggWindow(OpggWindowBase):
         self.vBoxLayout.addWidget(self.statusBar)
         self.vBoxLayout.addWidget(self.enemyJungle, 0, Qt.AlignLeft)
         self.vBoxLayout.addWidget(self.masterLabel)
+        self.vBoxLayout.addWidget(self.masterList)
         self.vBoxLayout.addWidget(self.stackedWidget,1)
 
     @asyncSlot()
@@ -702,7 +776,7 @@ class OpggWindow(OpggWindowBase):
         self.bpRevision += 1
         if phase != self.draftFollow.phase:
             self.draftEpoch += 1
-            self._jungleOptions = None
+            self._jungleOptions = self._duelKey = None
         self.draftFollow.on_phase(phase)
         self.__updateFollowStatus()
         if phase == 'ChampSelect':
@@ -863,6 +937,10 @@ class OpggWindow(OpggWindowBase):
 
     def stop(self):
         self._stopping = True
+        if self._duelTask:
+            self._duelTask.cancel()
+        for task in tuple(self._iconTasks.values()):
+            task.cancel()
         self.clearDraftAvailability()
         self.loadRevision += 1
         self._pendingFilterToken = None

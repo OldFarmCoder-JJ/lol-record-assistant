@@ -91,6 +91,13 @@ class Opgg:
         os.replace(temporary, path)
         return path
 
+    async def draftLaneMatchups(self, region, tier, position, enemy, version):
+        if region in ('cn', 'consensus'):
+            rows, _, group = await self.rift.counters(tier, version, enemy, position)
+            return rows, ('国服大师+' if group != tier else '国服')
+        raw = await self.__fetchChampionBuild(region, 'ranked', enemy, position.lower(), tier)
+        return parse_overseas_counters(raw, enemy, position, version), SOURCE_NAMES[region]
+
     async def getSelectedMatchup(self, region, tier, position, ally_id, enemy_id):
         """The user's pick is never subject to winning/strength/availability filters."""
         sources = SOURCES if region == 'consensus' else (region,)
