@@ -21,7 +21,7 @@ from app.lol.opgg import opgg
 from app.lol.champions import ChampionAlias
 from app.lol.rift_analysis import bp_snapshot
 from app.lol.draft_follow import DraftFollow, draft_target
-from app.lol.draft_master import locked_teams, recommend, identify_opponent
+from app.lol.draft_master import locked_teams, recommend, identify_opponent, own_locked_pick
 from app.lol.ranking_cache import RankingCache
 from app.lol.draft_availability import DraftAvailability
 from app.common.logger import logger
@@ -197,6 +197,9 @@ class OpggWindow(OpggWindowBase):
         self._duelRows = {}
         self._duelSource = ''
         self._iconTasks = {}
+        self.ownGuide = PushButton()
+        self.ownGuide.hide()
+        self.ownGuide.clicked.connect(self.openOwnGuide)
         self.masterLabel = BodyLabel()
         self.masterLabel.setWordWrap(True)
         self.masterLabel.setTextFormat(Qt.PlainText)
@@ -260,17 +263,28 @@ class OpggWindow(OpggWindowBase):
             combo.currentIndexChanged.connect(self.refreshDraftMaster)
         self.__updateFollowStatus()
 
+    def openOwnGuide(self):
+        session = self.currentDraftSession or {}
+        hero = own_locked_pick(session)
+        if hero:
+            self.__toChampionBuildInterface(hero, 'ranked', self.clientLane or self.positionComboBox.currentData())
+
     def refreshDraftMaster(self, *args):
         session = self.currentDraftSession or {}
         target = draft_target(self.currentDraftFlow, session)
         if (not target or target['mode'] != 'ranked' or self.modeComboBox.currentData() != 'ranked'
                 or self._stopping or not session):
+            self.ownGuide.hide()
             self.masterList.hide()
             self.masterLabel.hide()
             self.enemyJungle.hide()
             return
         enemies, allies, assigned, locked = locked_teams(session)
+        self.ownGuide.setVisible(locked)
         if locked:
+            hero = own_locked_pick(session)
+            name = connector.manager.getChampionNameById(hero) if connector.manager else str(hero)
+            self.ownGuide.setText(f'我选 · {name}   查看符文和出装')
             self.masterList.hide()
             self.masterLabel.hide()
             self.enemyJungle.hide()
@@ -475,6 +489,7 @@ class OpggWindow(OpggWindowBase):
             self._pickableTask.cancel()
             self._pickableTask = None
         self.tierInterface.tierList.setDraftAvailability(DraftAvailability())
+        self.ownGuide.hide()
         self.masterLabel.hide()
         self.masterList.hide()
         self.enemyJungle.hide()
@@ -625,6 +640,7 @@ class OpggWindow(OpggWindowBase):
         self.vBoxLayout.addLayout(self.filterLayout)
         self.vBoxLayout.addWidget(self.statusBar)
         self.vBoxLayout.addWidget(self.enemyJungle, 0, Qt.AlignLeft)
+        self.vBoxLayout.addWidget(self.ownGuide, 0, Qt.AlignLeft)
         self.vBoxLayout.addWidget(self.masterLabel)
         self.vBoxLayout.addWidget(self.masterList)
         self.vBoxLayout.addWidget(self.stackedWidget,1)
@@ -740,7 +756,7 @@ class OpggWindow(OpggWindowBase):
             return
         self.bpRevision += 1
         opponents, _ = bp_snapshot(session)
-        self.tierInterface.tierList.setOpponents(opponents)
+        self.tierInterface.tierList.setOpponents(opponents, own_locked_pick(session))
         local = next((p for p in session.get('myTeam') or [] if p.get('cellId')==session.get('localPlayerCellId')), {})
         lane = ALIASES.get((local.get('assignedPosition') or '').lower())
         self.clientLane = lane

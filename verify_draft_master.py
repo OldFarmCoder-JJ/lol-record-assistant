@@ -118,5 +118,29 @@ window._displayedTierPayload={'data':{'JUNGLE':rows}}
 text = update([99,142,202], [22,101,103])
 assert window.masterList.count() > 3 and '52.6%' in text
 assert all(not window.masterList.item(i).icon().isNull() for i in range(window.masterList.count()))
+# The user's Poppy support game: actual interruptible abilities, not generic mobility.
+enemies = {36, 104, 7, 67, 136}
+poppy = next(p for p in recommend('SUPPORT', enemies, {233, 11, 127, 51},
+                                  DraftAvailability(), prefs, [], str) if p.hero == 78)
+assert all(t in poppy.reason for t in ('男枪E', '妖姬W去程', '薇恩Q', '龙王W')), poppy
+assert '蒙多' not in poppy.reason
+# No W-specific bonus for an enemy team of blinks/walkers.
+assert all('W圈内' not in p.reason for p in recommend('SUPPORT', {38,81,36}, {22,11},
+                                                       DraftAvailability(), prefs, [], str))
+local['championId'] = 78
+local['assignedPosition'] = 'utility'
+update(list(enemies))
+assert not window.ownGuide.isHidden() and '我选' in window.ownGuide.text()
+opened = []
+window._OpggWindow__toChampionBuildInterface = lambda *args: opened.append(args)
+window.ownGuide.click()
+assert opened == [(78, 'ranked', 'SUPPORT')]
+# A post-lock trade changes the local portrait while the completed pick stays old.
+local['championId'] = 89
+window.onChampSelect(session, flow=flow)
+window.ownGuide.click()
+assert opened[-1] == (89, 'ranked', 'SUPPORT')
+window.onGameStatus('Lobby')
+assert window.ownGuide.isHidden()
 window.stop()
 print('PASS draft master: locked teams, rankings, bans, pickable, familiarity, lifecycle and mode')

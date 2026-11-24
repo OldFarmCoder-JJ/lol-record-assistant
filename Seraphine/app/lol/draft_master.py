@@ -10,7 +10,7 @@ LANE_PICKS = {
     'JUNGLE': (33, 78, 113, 32, 254, 121, 203, 48, 427, 59, 57, 5, 14, 54, 28, 107, 141),
     'MID': (127, 3, 163, 69, 90, 45, 61, 101, 115, 103, 34, 268, 38),
     'ADC': (222, 67, 96, 145, 81, 15, 110, 51, 22, 498, 18, 29),
-    'SUPPORT': (201, 40, 117, 12, 111, 89, 25, 267, 43, 143, 161, 63),
+    'SUPPORT': (78, 201, 40, 117, 12, 111, 89, 25, 267, 43, 143, 161, 63),
 }
 # Nonexclusive, deliberately conservative tags. Missing tags confer no evidence.
 AUTO = {11, 23, 24, 17, 51, 67, 96, 222, 22, 29, 15, 18, 119, 236, 523,
@@ -31,6 +31,10 @@ ASSASSINS = {7, 28, 38, 55, 56, 64, 76, 84, 91, 105, 107, 121, 141, 238, 245, 24
 RANGED_PHYSICAL = {15, 18, 21, 22, 29, 51, 81, 104, 119, 126, 133, 202, 203, 222, 236, 498, 523}
 LOW_TANK_DAMAGE = {1, 7, 12, 16, 25, 37, 40, 53, 89, 99, 111, 117, 127, 134, 142, 201, 202, 267, 497, 555}
 TANK_BUSTERS = {11, 48, 67, 69, 96, 110, 114, 145, 203, 268, 887}
+# Specific, stoppable movements. Blinks and displacement-immune ults are excluded.
+POPPY_W_TARGETS = {104: '男枪E', 7: '妖姬W去程', 67: '薇恩Q', 136: '龙王W',
+                   39: '刀妹Q', 24: '贾克斯Q', 157: '亚索E', 236: '卢锡安E',
+                   64: '盲僧二段Q', 254: '蔚Q', 18: '小炮W', 58: '鳄鱼E'}
 RULES = (
     (AUTO, {17, 24, 33, 54, 98}, '对面有{}名普攻手，可限制普攻输出'),
     (DIVE, PEEL, '对面有{}名突进英雄，可保护后排'),
@@ -41,10 +45,21 @@ RULES = (
 )
 
 
+def completed_picks(session):
+    return {a.get('actorCellId'): a.get('championId') for group in session.get('actions') or []
+             for a in group if a.get('type') == 'pick' and a.get('completed') is True and (a.get('championId') or 0) > 0}
+def own_locked_pick(session):
+    local = session.get('localPlayerCellId')
+    locks = completed_picks(session)
+    if local is None or local not in locks:
+        return 0
+    player = next((p for p in session.get('myTeam') or [] if p.get('cellId') == local), {})
+    return player.get('championId') or locks[local]
+
+
 def locked_teams(session):
     """Use completed actions to confirm slots, current portraits to follow trades."""
-    locks = {a.get('actorCellId'): a.get('championId') for group in session.get('actions') or []
-             for a in group if a.get('type') == 'pick' and a.get('completed') is True and (a.get('championId') or 0) > 0}
+    locks = completed_picks(session)
     local = session.get('localPlayerCellId')
     def team(side):
         return {p.get('championId') or locks[p['cellId']] for p in session.get(side) or []
@@ -97,6 +112,7 @@ def recommend(lane, enemies, allies, availability, preferences, rows, name, oppo
     candidates = dict.fromkeys([*by_id, *LANE_PICKS.get(lane, ())])
     direct = {c['championId'] for c in by_id.get(opponent, {}).get('counters', ()) or ()}
     enemy_base = by_id.get(opponent, {}).get('winRate') or .5
+    blocked = [skill for enemy, skill in POPPY_W_TARGETS.items() if enemy in enemies]
     scored = []
     for index, hero in enumerate(candidates):
         if hero in enemies or hero in allies or availability.status(hero) in ('picked', 'banned', 'unavailable'):
@@ -104,8 +120,12 @@ def recommend(lane, enemies, allies, availability, preferences, rows, name, oppo
         reasons = []
         for threats, answers, reason in RULES:
             count = len(threats & enemies)
+            if hero == 78 and blocked and threats is DIVE:
+                continue  # The specific W interaction replaces the generic peel reason.
             if hero in answers and count:
                 reasons.append((count, reason.format(count)))
+        if hero == 78 and blocked:
+            reasons.append((2 + len(blocked), 'W圈内可拦' + '、'.join(blocked)))
         fragile = len(enemies & FRAGILE)
         if hero in ASSASSINS and fragile >= 2:
             reasons.append((fragile + 1, f'可切入对面{fragile}名脆皮'))

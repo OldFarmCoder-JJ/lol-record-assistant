@@ -88,8 +88,18 @@ async def verify():
     assert ranking.items[0].opponentLabel.isVisible()
     assert ranking.items[0].countersLayout.itemAt(0).widget().toolTip().startswith('祖安怒兽')
     assert not ranking.titleBar.countersLabel.isHidden()
-    assert len(ranking.items) == 51 and ranking.height() > 650
+    assert len(ranking.items) == 51 and ranking.scrollArea.viewport().height() >= 4 * ranking.items[0].height()
     assert not hasattr(window, 'bpBoard') and not hasattr(window, 'bpBar')
+    own = draft()
+    own['myTeam'][0]['championId'] = 19
+    own['actions'][0].append(dict(type='pick', actorCellId=0, championId=19, completed=False))
+    window.onChampSelect(own)
+    assert ranking.items[0].championId == 11 and not ranking.ownPick
+    own['actions'][0][-1]['completed'] = True
+    window.onChampSelect(own)
+    assert [x.championId for x in ranking.items[:2]] == [19,11]
+    assert ranking.items[0].ownLabel.isVisible() and ranking.items[1].opponentLabel.isVisible()
+    assert ranking.items[0].numberLabel.text() == '51'
     assigned = draft()
     assigned['myTeam'][0]['assignedPosition'] = 'top'
     window.onChampSelect(assigned)

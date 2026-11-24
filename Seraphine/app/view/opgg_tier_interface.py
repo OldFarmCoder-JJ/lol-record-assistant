@@ -82,6 +82,7 @@ class TierListWidget(QFrame):
 
         self.items: list[ListItem] = []
         self.available = {}
+        self.ownPick = 0
         self.opponents = frozenset()
         self.sortKey = 'rank'
         self._rowsData = None
@@ -289,6 +290,7 @@ class TierListWidget(QFrame):
                 available_rank += 1
             # Missing rates never receive a high-win-rate badge.
             item.availableRank = available_rank if selected and item.info.get('winRate') is not None else 0
+            item.ownPick = not mayhem and hero == self.ownPick
             item.opponent = not mayhem and hero in self.opponents
             suffix = active[hero] if selected else ''
             if 0 < item.availableRank <= 3:
@@ -296,6 +298,7 @@ class TierListWidget(QFrame):
             item.availabilityText = suffix
             item.refreshDetail()
             item.nameLabel.setToolTip(item.name + (' · ' + suffix if suffix else '') + (' · 对面已锁定' if item.opponent else ''))
+            item.ownLabel.setVisible(item.ownPick)
             item.opponentLabel.setVisible(item.opponent)
             item.update()
         self.__update()
@@ -305,19 +308,21 @@ class TierListWidget(QFrame):
     def _rankOrder(self, item):
         value = item.info.get(self.sortKey)
         pinned = not item.info.get('mayhem') and item.championId in self.opponents
-        return (not pinned, value is None,
+        own = not item.info.get('mayhem') and item.championId == self.ownPick
+        return (not own, not pinned, value is None,
                 (value if self.sortKey == 'rank' else -value) if value is not None else 0,
                 item.info.get('rank', 9999))
 
-    def setOpponents(self, champion_ids):
+    def setOpponents(self, champion_ids, own_pick=0):
         opponents = frozenset(champion_ids)
-        if opponents == self.opponents:
+        if opponents == self.opponents and own_pick == self.ownPick:
             return
+        self.ownPick = own_pick
         self.opponents = opponents
         if not self.items or self.items[0].info.get('mayhem'):
             return
         self.setAvailable(self.available, force=True)
-        if any(item.opponent for item in self.items):
+        if any(item.opponent or item.ownPick for item in self.items):
             self.scrollArea.delegate.vScrollBar.resetValue(0)
             self.scrollArea.verticalScrollBar().setValue(0)
 
@@ -596,14 +601,16 @@ class ElidedLabel(BodyLabel):
 class ListItem(ColorAnimationFrame):
     favoriteRequested = pyqtSignal(int)
     availableRank = 0
+    ownPick = False
     opponent = False
 
     def paintEvent(self, event):
         super().paintEvent(event)
-        if 0 < self.availableRank <= 3 or self.opponent:
+        if 0 < self.availableRank <= 3 or self.opponent or self.ownPick:
             painter = QPainter(self)
             painter.setRenderHint(QPainter.Antialiasing)
-            painter.setPen(QPen(QColor('#d04a50') if self.opponent else QColor('#d39a28'), 2))
+            color = '#17876d' if self.ownPick else '#d04a50' if self.opponent else '#d39a28'
+            painter.setPen(QPen(QColor(color), 2))
             painter.setBrush(Qt.NoBrush)
             painter.drawRoundedRect(self.rect().adjusted(2, 2, -2, -2), 4, 4)
             painter.end()
@@ -633,6 +640,10 @@ class ListItem(ColorAnimationFrame):
         self.nameLayout.addWidget(self.detailLabel)
         self.detailLabel.hide()
         self.availabilityText = self.recentText = ''
+        self.ownLabel = QLabel('我选')
+        self.ownLabel.setStyleSheet('color: #17876d; font-size: 11px; font-weight: 600;')
+        self.ownLabel.setToolTip('本人已锁定')
+        self.ownLabel.hide()
         self.opponentLabel = QLabel('对面')
         self.opponentLabel.setStyleSheet('color: #d04a50; font-size: 11px; font-weight: 600;')
         self.opponentLabel.setToolTip('对面已锁定 · 当前分路榜中存在该英雄，不代表已确认对方分路')
@@ -731,6 +742,7 @@ class ListItem(ColorAnimationFrame):
         self.hBoxLayout.addWidget(self.numberLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.championIcon, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.nameWidget, 1)
+        self.hBoxLayout.addWidget(self.ownLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.opponentLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.tierLabel, alignment=Qt.AlignCenter)
         self.hBoxLayout.addWidget(self.winRateLabel, alignment=Qt.AlignCenter)
